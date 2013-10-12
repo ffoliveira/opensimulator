@@ -270,12 +270,12 @@ namespace OpenSim.Data.PGSQL
 
                     if (m_DataField != null)
                     {
-                        Dictionary<string, string> data =
-                                new Dictionary<string, string>();
+                        Dictionary<string, object> data =
+                                new Dictionary<string, object>();
 
                         foreach (string col in m_ColumnNames)
                         {
-                            data[col] = reader[col].ToString();
+                            data[col] = reader[col];
 
                             if (data[col] == null)
                                 data[col] = String.Empty;
@@ -319,7 +319,7 @@ namespace OpenSim.Data.PGSQL
 
                 StringBuilder query = new StringBuilder();
                 List<String> names = new List<String>();
-                List<String> values = new List<String>();
+                List<object> values = new List<object>();
 
                 foreach (FieldInfo fi in m_Fields.Values)
                 {
@@ -346,10 +346,10 @@ namespace OpenSim.Data.PGSQL
 
                 if (m_DataField != null)
                 {
-                    Dictionary<string, string> data =
-                            (Dictionary<string, string>)m_DataField.GetValue(row);
+                    Dictionary<string, object> data =
+                            (Dictionary<string, object>)m_DataField.GetValue(row);
 
-                    foreach (KeyValuePair<string, string> kvp in data)
+                    foreach (KeyValuePair<string, object> kvp in data)
                     {
                         if (constraintFields.Count > 0 && constraintFields.Contains(kvp.Key))
                         {
@@ -370,9 +370,10 @@ namespace OpenSim.Data.PGSQL
                 int i = 0;
                 for (i = 0; i < names.Count - 1; i++)
                 {
-                    query.AppendFormat("\"{0}\" = {1}, ", names[i], values[i]);
+                    query.AppendFormat("\"{0}\" = :{1}, ", names[i], names[i]);
                 }
-                query.AppendFormat("\"{0}\" = {1} ", names[i], values[i]);
+                query.AppendFormat("\"{0}\" = :{1} ", names[i], names[i]);
+
                 if (constraints.Count > 0)
                 {
                     List<string> terms = new List<string>();
@@ -400,7 +401,15 @@ namespace OpenSim.Data.PGSQL
                     query = new StringBuilder();
                     query.AppendFormat("INSERT INTO {0} (\"", m_Realm);
                     query.Append(String.Join("\",\"", names.ToArray()));
-                    query.Append("\") values (" + String.Join(",", values.ToArray()) + ")");
+                    query.Append("\") values (");
+                    int x = 0;
+                    for (x = 0; x < names.Count - 1; x++)
+                    {
+                        query.AppendFormat(" :{0}, ", names[x]);
+                    }
+                    query.AppendFormat(":{0} ); ", names[x]);
+                    //query.Append("\") values (" + String.Join(",", values.ToArray()) + ")");
+
                     cmd.Connection = conn;
                     cmd.CommandText = query.ToString();
                     
