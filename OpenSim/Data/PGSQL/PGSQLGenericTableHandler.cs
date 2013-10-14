@@ -270,12 +270,12 @@ namespace OpenSim.Data.PGSQL
 
                     if (m_DataField != null)
                     {
-                        Dictionary<string, object> data =
-                                new Dictionary<string, object>();
+                        Dictionary<string, string> data =
+                                new Dictionary<string, string>();
 
                         foreach (string col in m_ColumnNames)
                         {
-                            data[col] = reader[col];
+                            data[col] = reader[col].ToString();
 
                             if (data[col] == null)
                                 data[col] = String.Empty;
@@ -346,10 +346,10 @@ namespace OpenSim.Data.PGSQL
 
                 if (m_DataField != null)
                 {
-                    Dictionary<string, object> data =
-                            (Dictionary<string, object>)m_DataField.GetValue(row);
+                    Dictionary<string, string> data =
+                            (Dictionary<string, string>)m_DataField.GetValue(row);
 
-                    foreach (KeyValuePair<string, object> kvp in data)
+                    foreach (KeyValuePair<string, string> kvp in data)
                     {
                         if (constraintFields.Count > 0 && constraintFields.Contains(kvp.Key))
                         {
