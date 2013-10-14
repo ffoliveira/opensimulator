@@ -143,7 +143,6 @@ namespace OpenSim.Data.MySQL
             {
                 dbcon.Open();
                 cmd.Connection = dbcon;
-                cmd.CommandTimeout = 240;
 
                 using (IDataReader reader = cmd.ExecuteReader())
                 {
@@ -184,12 +183,12 @@ namespace OpenSim.Data.MySQL
                 
                         if (m_DataField != null)
                         {
-                            Dictionary<string, object> data =
-                                new Dictionary<string, object>();
+                            Dictionary<string, string> data =
+                                new Dictionary<string, string>();
 
                             foreach (string col in m_ColumnNames)
                             {
-                                data[col] = reader[col];
+                                data[col] = reader[col].ToString();
                                 if (data[col] == null)
                                     data[col] = String.Empty;
                             }
@@ -357,7 +356,6 @@ namespace OpenSim.Data.MySQL
             {
                 dbcon.Open();
                 cmd.Connection = dbcon;
-                cmd.CommandTimeout = 120 * 60;
 
                 return cmd.ExecuteScalar();
             }
