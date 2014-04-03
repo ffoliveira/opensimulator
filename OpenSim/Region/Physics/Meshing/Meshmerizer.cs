@@ -40,7 +40,6 @@ using log4net;
 using Nini.Config;
 using System.Reflection;
 using System.IO;
-using ComponentAce.Compression.Libs.zlib;
 
 namespace OpenSim.Region.Physics.Meshing
 {
@@ -549,7 +548,6 @@ namespace OpenSim.Region.Physics.Meshing
             return true;
         }
 
-
         /// <summary>
         /// decompresses a gzipped OSD object
         /// </summary>
@@ -564,15 +562,17 @@ namespace OpenSim.Region.Physics.Meshing
             {
                 using (MemoryStream outMs = new MemoryStream())
                 {
-                    using (ZOutputStream zOut = new ZOutputStream(outMs))
+                    using (DeflateStream decompressionStream = new DeflateStream(inMs, CompressionMode.Decompress))
                     {
                         byte[] readBuffer = new byte[2048];
+                        inMs.Read(readBuffer, 0, 2); // skip first 2 bytes in header
                         int readLen = 0;
-                        while ((readLen = inMs.Read(readBuffer, 0, readBuffer.Length)) > 0)
-                        {
-                            zOut.Write(readBuffer, 0, readLen);
-                        }
-                        zOut.Flush();
+
+                        while ((readLen = decompressionStream.Read(readBuffer, 0, readBuffer.Length)) > 0)
+                            outMs.Write(readBuffer, 0, readLen);
+
+                        outMs.Flush();
+
                         outMs.Seek(0, SeekOrigin.Begin);
 
                         byte[] decompressedBuf = outMs.GetBuffer();
@@ -629,10 +629,11 @@ namespace OpenSim.Region.Physics.Meshing
 
                 try
                 {
-                    OpenMetaverse.Imaging.ManagedImage unusedData;
-                    OpenMetaverse.Imaging.OpenJPEG.DecodeToImage(primShape.SculptData, out unusedData, out idata);
+                    OpenMetaverse.Imaging.ManagedImage managedImage;
 
-                    if (idata == null)
+                    OpenMetaverse.Imaging.OpenJPEG.DecodeToImage(primShape.SculptData, out managedImage);
+
+                    if (managedImage == null)
                     {
                         // In some cases it seems that the decode can return a null bitmap without throwing
                         // an exception
@@ -641,9 +642,12 @@ namespace OpenSim.Region.Physics.Meshing
                         return false;
                     }
 
-                    unusedData = null;
+                    if ((managedImage.Channels & OpenMetaverse.Imaging.ManagedImage.ImageChannels.Alpha) != 0)
+                        managedImage.ConvertChannels(managedImage.Channels & ~OpenMetaverse.Imaging.ManagedImage.ImageChannels.Alpha);
 
-                    //idata = CSJ2K.J2kImage.FromBytes(primShape.SculptData);
+                    Bitmap imgData = OpenMetaverse.Imaging.LoadTGAClass.LoadTGA(new MemoryStream(managedImage.ExportTGA()));
+                    idata = (Image)imgData;
+                    managedImage = null;
 
                     if (cacheSculptMaps)
                     {

@@ -245,8 +245,9 @@ namespace OpenSim.Region.CoreModules.Avatar.Attachments
                         string state = sog.GetStateSnapshot();
                         ad.AttachmentObjectStates.Add(state);
                         sp.InTransitScriptStates.Add(state);
-                        // Let's remove the scripts of the original object here
-                        sog.RemoveScriptInstances(true);
+
+                        // Scripts of the originals will be removed when the Agent is successfully removed.
+                        // sog.RemoveScriptInstances(true);
                     }
                 }
             }
@@ -321,7 +322,7 @@ namespace OpenSim.Region.CoreModules.Avatar.Attachments
                 }
                 catch (Exception e)
                 {
-                    UUID agentId = (sp.ControllingClient == null) ? (UUID)null : sp.ControllingClient.AgentId;
+                    UUID agentId = (sp.ControllingClient == null) ? default(UUID) : sp.ControllingClient.AgentId;
                     m_log.ErrorFormat("[ATTACHMENTS MODULE]: Unable to rez attachment with itemID {0}, assetID {1}, point {2} for {3}: {4}\n{5}",
                         attach.ItemID, attach.AssetID, attachmentPt, agentId, e.Message, e.StackTrace);
                 }

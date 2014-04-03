@@ -266,10 +266,21 @@ namespace OpenSim
                                           SavePrimsXml2);
 
             m_console.Commands.AddCommand("Archiving", false, "load oar",
-                                          "load oar [--merge] [--skip-assets] [<OAR path>]",
+                                          "load oar [--merge] [--skip-assets]"
+                                             + " [--force-terrain] [--force-parcels]"
+                                             + " [--no-objects]"
+                                             + " [--rotation degrees] [--rotation-center \"<x,y,z>\"]"
+                                             + " [--displacement \"<x,y,z>\"]"
+                                             + " [<OAR path>]",
                                           "Load a region's data from an OAR archive.",
-                                          "--merge will merge the OAR with the existing scene." + Environment.NewLine
+                                          "--merge will merge the OAR with the existing scene (suppresses terrain and parcel info loading)." + Environment.NewLine
                                           + "--skip-assets will load the OAR but ignore the assets it contains." + Environment.NewLine
+                                          + "--displacement will add this value to the position of every object loaded" + Environment.NewLine
+                                          + "--force-terrain forces the loading of terrain from the oar (undoes suppression done by --merge)" + Environment.NewLine
+                                          + "--force-parcels forces the loading of parcels from the oar (undoes suppression done by --merge)" + Environment.NewLine
+                                          + "--rotation specified rotation to be applied to the oar. Specified in degrees." + Environment.NewLine
+                                          + "--rotation-center Location (relative to original OAR) to apply rotation. Default is <128,128,0>" + Environment.NewLine
+                                          + "--no-objects suppresses the addition of any objects (good for loading only the terrain)" + Environment.NewLine
                                           + "The path can be either a filesystem location or a URI."
                                           + "  If this is not given then the command looks for an OAR named region.oar in the current directory.",
                                           LoadOar);
@@ -295,6 +306,21 @@ namespace OpenSim
                                           "edit scale <name> <x> <y> <z>",
                                           "Change the scale of a named prim", 
                                           HandleEditScale);
+
+            m_console.Commands.AddCommand("Objects", false, "rotate scene",
+                                          "rotate scene <degrees> [centerX, centerY]",
+                                          "Rotates all scene objects around centerX, centerY (defailt 128, 128) (please back up your region before using)",
+                                          HandleRotateScene);
+
+            m_console.Commands.AddCommand("Objects", false, "scale scene",
+                                          "scale scene <factor>",
+                                          "Scales the scene objects (please back up your region before using)",
+                                          HandleScaleScene);
+
+            m_console.Commands.AddCommand("Objects", false, "translate scene",
+                                          "translate scene xOffset yOffset zOffset",
+                                          "translates the scene objects (please back up your region before using)",
+                                          HandleTranslateScene);
 
             m_console.Commands.AddCommand("Users", false, "kick user",
                                           "kick user <first> <last> [--force] [message]",
@@ -503,6 +529,121 @@ namespace OpenSim
             {
                 MainConsole.Instance.Output("Argument error: edit scale <prim name> <x> <y> <z>");
             }
+        }
+
+        private void HandleRotateScene(string module, string[] args)
+        {
+            string usage = "Usage: rotate scene <angle in degrees> [centerX centerY] (centerX and centerY are optional and default to Constants.RegionSize / 2";
+
+            float centerX = Constants.RegionSize * 0.5f;
+            float centerY = Constants.RegionSize * 0.5f;
+
+            if (args.Length < 3 || args.Length == 4)
+            {
+                MainConsole.Instance.Output(usage);
+                return;
+            }
+            
+            float angle = (float)(Convert.ToSingle(args[2]) / 180.0 * Math.PI);
+            OpenMetaverse.Quaternion rot = OpenMetaverse.Quaternion.CreateFromAxisAngle(0, 0, 1, angle);
+
+            if (args.Length > 4)
+            {
+                centerX = Convert.ToSingle(args[3]);
+                centerY = Convert.ToSingle(args[4]);
+            }
+
+            Vector3 center = new Vector3(centerX, centerY, 0.0f);
+
+            SceneManager.ForEachSelectedScene(delegate(Scene scene) 
+            {
+                scene.ForEachSOG(delegate(SceneObjectGroup sog)
+                {
+                    if (!sog.IsAttachment)
+                    {
+                        sog.RootPart.UpdateRotation(rot * sog.GroupRotation);
+                        Vector3 offset = sog.AbsolutePosition - center;
+                        offset *= rot;
+                        sog.UpdateGroupPosition(center + offset);
+                    }
+                });
+            });
+        }
+
+        private void HandleScaleScene(string module, string[] args)
+        {
+            string usage = "Usage: scale scene <factor>";
+
+            if (args.Length < 3)
+            {
+                MainConsole.Instance.Output(usage);
+                return;
+            }
+
+            float factor = (float)(Convert.ToSingle(args[2]));
+
+            float minZ = float.MaxValue;
+
+            SceneManager.ForEachSelectedScene(delegate(Scene scene)
+            {
+                scene.ForEachSOG(delegate(SceneObjectGroup sog)
+                {
+                    if (!sog.IsAttachment)
+                    {
+                        if (sog.RootPart.AbsolutePosition.Z < minZ)
+                            minZ = sog.RootPart.AbsolutePosition.Z;
+                    }
+                });
+            });
+
+            SceneManager.ForEachSelectedScene(delegate(Scene scene)
+            {
+                scene.ForEachSOG(delegate(SceneObjectGroup sog)
+                {
+                    if (!sog.IsAttachment)
+                    {
+                        Vector3 tmpRootPos = sog.RootPart.AbsolutePosition;
+                        tmpRootPos.Z -= minZ;
+                        tmpRootPos *= factor;
+                        tmpRootPos.Z += minZ;
+
+                        foreach (SceneObjectPart sop in sog.Parts)
+                        {
+                            if (sop.ParentID != 0)
+                                sop.OffsetPosition *= factor;
+                            sop.Scale *= factor;
+                        }
+
+                        sog.UpdateGroupPosition(tmpRootPos);
+                    }
+                });
+            });
+        }
+
+        private void HandleTranslateScene(string module, string[] args)
+        {
+            string usage = "Usage: translate scene <xOffset, yOffset, zOffset>";
+
+            if (args.Length < 5)
+            {
+                MainConsole.Instance.Output(usage);
+                return;
+            }
+
+            float xOFfset = (float)Convert.ToSingle(args[2]);
+            float yOffset = (float)Convert.ToSingle(args[3]);
+            float zOffset = (float)Convert.ToSingle(args[4]);
+
+            Vector3 offset = new Vector3(xOFfset, yOffset, zOffset);
+
+            SceneManager.ForEachSelectedScene(delegate(Scene scene)
+            {
+                scene.ForEachSOG(delegate(SceneObjectGroup sog)
+                {
+                    if (!sog.IsAttachment)
+                        sog.UpdateGroupPosition(sog.AbsolutePosition + offset);
+                });
+            });
         }
 
         /// <summary>
@@ -766,7 +907,7 @@ namespace OpenSim
                             foreach (IRegionModuleBase module in sharedModules.OrderBy(m => m.Name))
                                 MainConsole.Instance.OutputFormat("New Region Module (Shared): {0}", module.Name);
 
-                            foreach (IRegionModuleBase module in sharedModules.OrderBy(m => m.Name))
+                            foreach (IRegionModuleBase module in nonSharedModules.OrderBy(m => m.Name))
                                 MainConsole.Instance.OutputFormat("New Region Module (Non-Shared): {0}", module.Name);
                         }
                     );
@@ -775,17 +916,24 @@ namespace OpenSim
                     break;
 
                 case "regions":
+                    ConsoleDisplayTable cdt = new ConsoleDisplayTable();
+                    cdt.AddColumn("Name", ConsoleDisplayUtil.RegionNameSize);
+                    cdt.AddColumn("ID", ConsoleDisplayUtil.UuidSize);
+                    cdt.AddColumn("Position", ConsoleDisplayUtil.CoordTupleSize);
+                    cdt.AddColumn("Port", ConsoleDisplayUtil.PortSize);
+                    cdt.AddColumn("Ready?", 6);
+                    cdt.AddColumn("Estate", ConsoleDisplayUtil.EstateNameSize);
                     SceneManager.ForEachScene(
-                        delegate(Scene scene)
-                            {
-                                MainConsole.Instance.Output(String.Format(
-                                           "Region Name: {0}, Region XLoc: {1}, Region YLoc: {2}, Region Port: {3}, Estate Name: {4}",
-                                           scene.RegionInfo.RegionName,
-                                           scene.RegionInfo.RegionLocX,
-                                           scene.RegionInfo.RegionLocY,
-                                           scene.RegionInfo.InternalEndPoint.Port,
-                                           scene.RegionInfo.EstateSettings.EstateName));
-                            });
+                        scene => 
+                        { 
+                            RegionInfo ri = scene.RegionInfo; 
+                            cdt.AddRow(
+                                ri.RegionName, ri.RegionID, string.Format("{0},{1}", ri.RegionLocX, ri.RegionLocY), 
+                                ri.InternalEndPoint.Port, scene.Ready ? "Yes" : "No", ri.EstateSettings.EstateName);
+                        }
+                    );
+
+                    MainConsole.Instance.Output(cdt.ToString());
                     break;
 
                 case "ratings":
@@ -834,7 +982,7 @@ namespace OpenSim
                             aCircuit.child ? "child" : "root",
                             aCircuit.circuitcode.ToString(),
                             aCircuit.IPAddress != null ? aCircuit.IPAddress.ToString() : "not set",
-                            aCircuit.Viewer);
+                            Util.GetViewerName(aCircuit));
                 });
 
             MainConsole.Instance.Output(cdt.ToString());

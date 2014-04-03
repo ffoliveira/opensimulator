@@ -58,7 +58,7 @@ public sealed class BSTerrainHeightmap : BSTerrainPhys
         {
             initialMap[ii] = BSTerrainManager.HEIGHT_INITIALIZATION;
         }
-        m_mapInfo = new BulletHMapInfo(id, initialMap);
+        m_mapInfo = new BulletHMapInfo(id, initialMap, regionSize.X, regionSize.Y);
         m_mapInfo.minCoords = minTerrainCoords;
         m_mapInfo.maxCoords = maxTerrainCoords;
         m_mapInfo.terrainRegionBase = TerrainBase;
@@ -72,7 +72,7 @@ public sealed class BSTerrainHeightmap : BSTerrainPhys
                                                     Vector3 minCoords, Vector3 maxCoords)
         : base(physicsScene, regionBase, id)
     {
-        m_mapInfo = new BulletHMapInfo(id, initialMap);
+        m_mapInfo = new BulletHMapInfo(id, initialMap, maxCoords.X - minCoords.X, maxCoords.Y - minCoords.Y);
         m_mapInfo.minCoords = minCoords;
         m_mapInfo.maxCoords = maxCoords;
         m_mapInfo.minZ = minCoords.Z;
@@ -112,14 +112,13 @@ public sealed class BSTerrainHeightmap : BSTerrainPhys
         m_physicsScene.PE.SetRestitution(m_mapInfo.terrainBody, BSParam.TerrainRestitution);
         m_physicsScene.PE.SetCollisionFlags(m_mapInfo.terrainBody, CollisionFlags.CF_STATIC_OBJECT);
 
+        m_mapInfo.terrainBody.collisionType = CollisionType.Terrain;
+
         // Return the new terrain to the world of physical objects
         m_physicsScene.PE.AddObjectToWorld(m_physicsScene.World, m_mapInfo.terrainBody);
 
         // redo its bounding box now that it is in the world
         m_physicsScene.PE.UpdateSingleAabb(m_physicsScene.World, m_mapInfo.terrainBody);
-
-        m_mapInfo.terrainBody.collisionType = CollisionType.Terrain;
-        m_mapInfo.terrainBody.ApplyCollisionMask(m_physicsScene);
 
         // Make it so the terrain will not move or be considered for movement.
         m_physicsScene.PE.ForceActivationState(m_mapInfo.terrainBody, ActivationState.DISABLE_SIMULATION);

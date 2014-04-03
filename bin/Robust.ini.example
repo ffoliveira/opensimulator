@@ -15,7 +15,7 @@
 [Startup]
   ; Place to create a PID file
   ; If no path if specified then a PID file is not created.
-  ; PIDFile = "/tmp/my.pid"
+  ; PIDFile = "/tmp/Robust.exe.pid"
 
   ; Plugin Registry Location
   ; Set path to directory for plugin registry. Information
@@ -50,6 +50,8 @@ MapGetServiceConnector = "8002/OpenSim.Server.Handlers.dll:MapGetServiceConnecto
 ;OfflineIMServiceConnector = "8003/OpenSim.Addons.OfflineIM.dll:OfflineIMServiceRobustConnector"
 ;; Uncomment this if you want Groups V2 to work
 ;GroupsServiceConnector = "8003/OpenSim.Addons.Groups.dll:GroupsServiceRobustConnector"
+;; Uncomment to provide bakes caching
+;BakedTextureService = "8003/OpenSim.Server.Handlers.dll:XBakesConnector"
 
 ;; Uncomment for UserProfiles see [UserProfilesService] to configure...
 ; UserProfilesServiceConnector = "8002/OpenSim.Server.Handlers.dll:UserProfilesConnector"
@@ -425,7 +427,7 @@ MapGetServiceConnector = "8002/OpenSim.Server.Handlers.dll:MapGetServiceConnecto
 
     ; helper uri: optional: if it exists if will be used to tell the client to use
     ;                       this for all economy related things
-    ;economy = http://127.0.0.1:9000/
+    ;economy = http://127.0.0.1:8002/
 
     ; web page of grid: optional: page providing further information about your grid
     ;about = http://127.0.0.1/about/
@@ -449,4 +451,9 @@ MapGetServiceConnector = "8002/OpenSim.Server.Handlers.dll:MapGetServiceConnecto
     UserAccountService = OpenSim.Services.UserAccountService.dll:UserAccountService
     AuthenticationServiceModule = "OpenSim.Services.AuthenticationService.dll:PasswordAuthenticationService"
 
+
+[BakedTextureService]
+    LocalServiceModule = "OpenSim.Server.Handlers.dll:XBakes"
+    ;; This directory must exist and be writable for the user ROBUST runs as
+    BaseDirectory = "/data/bakes"
 

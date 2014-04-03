@@ -46,6 +46,7 @@ namespace OpenSim.Data.PGSQL
     public class PGSQLSimulationData : ISimulationDataStore
     {
         private const string _migrationStore = "RegionStore";
+        private const string LogHeader = "[REGION DB PGSQL]";
 
         // private static FileSystemDataStore Instance = new FileSystemDataStore();
         private static readonly ILog _Log = LogManager.GetLogger(MethodBase.GetCurrentMethod().DeclaringType);
@@ -523,44 +524,54 @@ namespace OpenSim.Data.PGSQL
         /// <returns></returns>
         public double[,] LoadTerrain(UUID regionID)
         {
-            double[,] terrain = new double[(int)Constants.RegionSize, (int)Constants.RegionSize];
-            terrain.Initialize();
+            double[,] ret = null;
+            TerrainData terrData = LoadTerrain(regionID, (int)Constants.RegionSize, (int)Constants.RegionSize, (int)Constants.RegionHeight);
+            if (terrData != null)
+                ret = terrData.GetDoubles();
+            return ret;
+        }
+
+        // Returns 'null' if region not found
+        public TerrainData LoadTerrain(UUID regionID, int pSizeX, int pSizeY, int pSizeZ)
+        {
+            TerrainData terrData = null;
 
             string sql = @"select ""RegionUUID"", ""Revision"", ""Heightfield"" from terrain 
                             where ""RegionUUID"" = :RegionUUID order by ""Revision"" desc limit 1; ";
 
             using (NpgsqlConnection conn = new NpgsqlConnection(m_connectionString))
-            using (NpgsqlCommand cmd = new NpgsqlCommand(sql, conn))
             {
-                // PGSqlParameter param = new PGSqlParameter();
-                cmd.Parameters.Add(_Database.CreateParameter("RegionUUID", regionID));
-                conn.Open();
-                using (NpgsqlDataReader reader = cmd.ExecuteReader())
+                using (NpgsqlCommand cmd = new NpgsqlCommand(sql, conn))
                 {
-                    int rev;
-                    if (reader.Read())
+                    // PGSqlParameter param = new PGSqlParameter();
+                    cmd.Parameters.Add(_Database.CreateParameter("RegionUUID", regionID));
+                    conn.Open();
+                    using (NpgsqlDataReader reader = cmd.ExecuteReader())
                     {
-                        MemoryStream str = new MemoryStream((byte[])reader["Heightfield"]);
-                        BinaryReader br = new BinaryReader(str);
-                        for (int x = 0; x < (int)Constants.RegionSize; x++)
+                        int rev;
+                        if (reader.Read())
                         {
-                            for (int y = 0; y < (int)Constants.RegionSize; y++)
-                            {
-                                terrain[x, y] = br.ReadDouble();
-                            }
+                            rev = Convert.ToInt32(reader["Revision"]);
+                            byte[] blob = (byte[])reader["Heightfield"];
+                            terrData = TerrainData.CreateFromDatabaseBlobFactory(pSizeX, pSizeY, pSizeZ, rev, blob);
                         }
-                        rev = (int)reader["Revision"];
+                        else
+                        {
+                            _Log.Info("[REGION DB]: No terrain found for region");
+                            return null;
+                        }
+                        _Log.Info("[REGION DB]: Loaded terrain revision r" + rev);
                     }
-                    else
-                    {
-                        _Log.Info("[REGION DB]: No terrain found for region");
-                        return null;
-                    }
-                    _Log.Info("[REGION DB]: Loaded terrain revision r" + rev);
                 }
             }
 
-            return terrain;
+            return terrData;
+        }
+
+        // Legacy entry point for when terrain was always a 256x256 heightmap
+        public void StoreTerrain(double[,] terrain, UUID regionID)
+        {
+            StoreTerrain(new HeightmapTerrainData(terrain), regionID);
         }
 
         /// <summary>
@@ -568,35 +579,43 @@ namespace OpenSim.Data.PGSQL
         /// </summary>
         /// <param name="terrain">terrain map data.</param>
         /// <param name="regionID">regionID.</param>
-        public void StoreTerrain(double[,] terrain, UUID regionID)
+        public void StoreTerrain(TerrainData terrData, UUID regionID)
         {
-            int revision = Util.UnixTimeSinceEpoch();
-
             //Delete old terrain map
             string sql = @"delete from terrain where ""RegionUUID""=:RegionUUID";
             using (NpgsqlConnection conn = new NpgsqlConnection(m_connectionString))
-            using (NpgsqlCommand cmd = new NpgsqlCommand(sql, conn))
             {
-                cmd.Parameters.Add(_Database.CreateParameter("RegionUUID", regionID));
-                conn.Open();
-                cmd.ExecuteNonQuery();
+                using (NpgsqlCommand cmd = new NpgsqlCommand(sql, conn))
+                {
+                    cmd.Parameters.Add(_Database.CreateParameter("RegionUUID", regionID));
+                    conn.Open();
+                    cmd.ExecuteNonQuery();
+
+                    _Log.InfoFormat("{0} Deleted terrain revision id = {1}", LogHeader, regionID);
+                }
             }
 
-            _Log.Info("[REGION DB]: Deleted terrain revision r " + revision);
+            int terrainDBRevision;
+            Array terrainDBblob;
+            terrData.GetDatabaseBlob(out terrainDBRevision, out terrainDBblob);
 
             sql = @"insert into terrain(""RegionUUID"", ""Revision"", ""Heightfield"") values(:RegionUUID, :Revision, :Heightfield)";
 
             using (NpgsqlConnection conn = new NpgsqlConnection(m_connectionString))
-            using (NpgsqlCommand cmd = new NpgsqlCommand(sql, conn))
             {
-                cmd.Parameters.Add(_Database.CreateParameter("RegionUUID", regionID));
-                cmd.Parameters.Add(_Database.CreateParameter("Revision", revision));
-                cmd.Parameters.Add(_Database.CreateParameter("Heightfield", serializeTerrain(terrain)));
-                conn.Open();
-                cmd.ExecuteNonQuery();
+                using (NpgsqlCommand cmd = new NpgsqlCommand(sql, conn))
+                {
+                    cmd.Parameters.Add(_Database.CreateParameter("RegionUUID", regionID));
+                    cmd.Parameters.Add(_Database.CreateParameter("Revision", terrainDBRevision));
+                    cmd.Parameters.Add(_Database.CreateParameter("Heightfield", terrainDBblob));
+                    conn.Open();
+                    cmd.ExecuteNonQuery();
+
+                    _Log.InfoFormat("{0} Stored terrain id = {1}, terrainSize = <{2},{3}>",
+                                    LogHeader, regionID, terrData.SizeX, terrData.SizeY);
+                }
             }
 
-            _Log.Info("[REGION DB]: Stored terrain revision r " + revision);
         }
 
         /// <summary>
@@ -727,7 +746,7 @@ namespace OpenSim.Data.PGSQL
             using (NpgsqlConnection conn = new NpgsqlConnection(m_connectionString))
             using (NpgsqlCommand cmd = new NpgsqlCommand(sql, conn))
             {
-                cmd.Parameters.Add(_Database.CreateParameter("regionID", regionUUID));
+                cmd.Parameters.Add(_Database.CreateParameter("regionID", regionUUID.ToString() ));
                 conn.Open();
                 using (NpgsqlDataReader result = cmd.ExecuteReader())
                 {
@@ -817,22 +836,23 @@ namespace OpenSim.Data.PGSQL
             using (NpgsqlCommand cmd = new NpgsqlCommand(sql, conn))
             {
                 conn.Open();
-                cmd.Parameters.Add(_Database.CreateParameter("region_id", regionID));
+                cmd.Parameters.Add(_Database.CreateParameter("region_id", regionID.ToString()));
                 cmd.ExecuteNonQuery();
             }
         }
 
         public void StoreRegionWindlightSettings(RegionLightShareData wl)
         {
-            string sql = @"select count (region_id) from regionwindlight where ""region_id"" = :region_id ;";
+            string sql = @"select region_id from regionwindlight where ""region_id"" = :region_id limit 1;";
             bool exists = false;
             using (NpgsqlConnection conn = new NpgsqlConnection(m_connectionString))
             {
                 conn.Open();
                 using (NpgsqlCommand cmd = new NpgsqlCommand(sql, conn))
                 {
-                    cmd.Parameters.Add(_Database.CreateParameter("region_id", wl.regionID));
-                    exists = (int)cmd.ExecuteScalar() > 0;
+                    cmd.Parameters.Add(_Database.CreateParameter("region_id", wl.regionID.ToString() ));
+                    NpgsqlDataReader dr = cmd.ExecuteReader();
+                    exists = dr.Read();
                 }
             }
             if (exists)
@@ -975,7 +995,7 @@ namespace OpenSim.Data.PGSQL
                 conn.Open();
                 using (NpgsqlCommand cmd = new NpgsqlCommand(sql, conn))
                 {
-                    cmd.Parameters.Add(_Database.CreateParameter("region_id", wl.regionID));
+                    cmd.Parameters.Add(_Database.CreateParameter("region_id", wl.regionID.ToString()));
                     cmd.Parameters.Add(_Database.CreateParameter("water_color_r", wl.waterColor.X));
                     cmd.Parameters.Add(_Database.CreateParameter("water_color_g", wl.waterColor.Y));
                     cmd.Parameters.Add(_Database.CreateParameter("water_color_b", wl.waterColor.Z));
@@ -993,7 +1013,7 @@ namespace OpenSim.Data.PGSQL
                     cmd.Parameters.Add(_Database.CreateParameter("big_wave_direction_y", wl.bigWaveDirection.Y));
                     cmd.Parameters.Add(_Database.CreateParameter("little_wave_direction_x", wl.littleWaveDirection.X));
                     cmd.Parameters.Add(_Database.CreateParameter("little_wave_direction_y", wl.littleWaveDirection.Y));
-                    cmd.Parameters.Add(_Database.CreateParameter("normal_map_texture", wl.normalMapTexture));
+                    cmd.Parameters.Add(_Database.CreateParameter("normal_map_texture", wl.normalMapTexture.ToString()));
                     cmd.Parameters.Add(_Database.CreateParameter("horizon_r", wl.horizon.X));
                     cmd.Parameters.Add(_Database.CreateParameter("horizon_g", wl.horizon.Y));
                     cmd.Parameters.Add(_Database.CreateParameter("horizon_b", wl.horizon.Z));
@@ -1347,30 +1367,6 @@ namespace OpenSim.Data.PGSQL
         }
 
         #region Private Methods
-
-        /// <summary>
-        /// Serializes the terrain data for storage in DB.
-        /// </summary>
-        /// <param name="val">terrain data</param>
-        /// <returns></returns>
-        private static Array serializeTerrain(double[,] val)
-        {
-            MemoryStream str = new MemoryStream(((int)Constants.RegionSize * (int)Constants.RegionSize) * sizeof(double));
-            BinaryWriter bw = new BinaryWriter(str);
-
-            // TODO: COMPATIBILITY - Add byte-order conversions
-            for (int x = 0; x < (int)Constants.RegionSize; x++)
-                for (int y = 0; y < (int)Constants.RegionSize; y++)
-                {
-                    double height = val[x, y];
-                    if (height == 0.0)
-                        height = double.Epsilon;
-
-                    bw.Write(height);
-                }
-
-            return str.ToArray();
-        }
 
         /// <summary>
         /// Stores new regionsettings.

@@ -85,9 +85,6 @@ namespace OpenSim.Region.ScriptEngine.Shared.CodeTools
 
         private static CSharpCodeProvider CScodeProvider = new CSharpCodeProvider();
         private static VBCodeProvider VBcodeProvider = new VBCodeProvider();
-//        private static JScriptCodeProvider JScodeProvider = new JScriptCodeProvider();
-        private static CSharpCodeProvider YPcodeProvider = new CSharpCodeProvider(); // YP is translated into CSharp
-        private static YP2CSConverter YP_Converter = new YP2CSConverter();
 
         // private static int instanceID = new Random().Next(0, int.MaxValue);                 // Unique number to use on our compiled files
         private static UInt64 scriptCompileCounter = 0;                                     // And a counter
@@ -404,12 +401,6 @@ namespace OpenSim.Region.ScriptEngine.Shared.CodeTools
                 WriteMapFile(assembly + ".map", linemap);
             }
 
-            if (language == enumCompileType.yp)
-            {
-                // Its YP, convert it to C#
-                compileScript = YP_Converter.Convert(Script);
-            }
-
             switch (language)
             {
                 case enumCompileType.cs:
@@ -423,13 +414,6 @@ namespace OpenSim.Region.ScriptEngine.Shared.CodeTools
                 case enumCompileType.vb:
                     compileScript = CreateVBCompilerScript(
                         compileScript, m_scriptEngine.ScriptClassName, m_scriptEngine.ScriptBaseClassName);
-                    break;
-//                case enumCompileType.js:
-//                    compileScript = CreateJSCompilerScript(compileScript, m_scriptEngine.ScriptBaseClassName);
-//                    break;
-                case enumCompileType.yp:
-                    compileScript = CreateYPCompilerScript(
-                        compileScript, m_scriptEngine.ScriptClassName,m_scriptEngine.ScriptBaseClassName);
                     break;
             }
 
@@ -484,22 +468,6 @@ namespace SecondLife
                     ? string.Join(", ", Array.ConvertAll<ParameterInfo, string>(constructorParameters, pi => pi.Name)) 
                     : "", 
                 compileScript);
-
-            return compileScript;
-        }
-
-        private static string CreateYPCompilerScript(string compileScript, string className, string baseClassName)
-        {
-            compileScript = String.Empty +
-                       "using OpenSim.Region.ScriptEngine.Shared.YieldProlog; " +
-                        "using OpenSim.Region.ScriptEngine.Shared; using System.Collections.Generic;\r\n" +
-                        String.Empty + "namespace SecondLife { " +
-                        String.Empty + "public class " + className + " : " + baseClassName + " { \r\n" +
-                        //@"public Script() { } " +
-                        @"static OpenSim.Region.ScriptEngine.Shared.YieldProlog.YP YP=null; " +
-                        @"public " + className + "() {  YP= new OpenSim.Region.ScriptEngine.Shared.YieldProlog.YP(); } " +
-                        compileScript +
-                        "} }\r\n";
 
             return compileScript;
         }
@@ -610,6 +578,7 @@ namespace SecondLife
                             results = CScodeProvider.CompileAssemblyFromSource(
                                 parameters, Script);
                         }
+
                         // Deal with an occasional segv in the compiler.
                         // Rarely, if ever, occurs twice in succession.
                         // Line # == 0 and no file name are indications that
@@ -617,7 +586,7 @@ namespace SecondLife
                         // error log.
                         if (results.Errors.Count > 0)
                         {
-                            if (!retried && (results.Errors[0].FileName == null || results.Errors[0].FileName == String.Empty) &&
+                            if (!retried && string.IsNullOrEmpty(results.Errors[0].FileName) &&
                                 results.Errors[0].Line == 0)
                             {
                                 // System.Console.WriteLine("retrying failed compilation");
@@ -634,28 +603,24 @@ namespace SecondLife
                         }
                     } while (!complete);
                     break;
-//                case enumCompileType.js:
-//                    results = JScodeProvider.CompileAssemblyFromSource(
-//                        parameters, Script);
-//                    break;
-                case enumCompileType.yp:
-                    results = YPcodeProvider.CompileAssemblyFromSource(
-                        parameters, Script);
-                    break;
                 default:
                     throw new Exception("Compiler is not able to recongnize " +
                                         "language type \"" + lang.ToString() + "\"");
             }
 
-            // Check result
-            // Go through errors
+//            foreach (Type type in results.CompiledAssembly.GetTypes())
+//            {
+//                foreach (MethodInfo method in type.GetMethods(BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance | BindingFlags.Static))
+//                {
+//                    m_log.DebugFormat("[COMPILER]: {0}.{1}", type.FullName, method.Name);
+//                }
+//            }
 
             //
             // WARNINGS AND ERRORS
             //
             bool hadErrors = false;
             string errtext = String.Empty;
-
             if (results.Errors.Count > 0)
             {
                 foreach (CompilerError CompErr in results.Errors)

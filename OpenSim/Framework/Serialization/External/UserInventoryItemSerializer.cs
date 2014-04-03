@@ -277,7 +277,7 @@ namespace OpenSim.Framework.Serialization.External
             writer.WriteStartElement("GroupOwned");
             writer.WriteString(inventoryItem.GroupOwned.ToString());
             writer.WriteEndElement();
-            if (options.ContainsKey("creators") && inventoryItem.CreatorData != null && inventoryItem.CreatorData != string.Empty)
+            if (options.ContainsKey("creators") && !string.IsNullOrEmpty(inventoryItem.CreatorData))
                 writer.WriteElementString("CreatorData", inventoryItem.CreatorData);
             else if (options.ContainsKey("home"))
             {
@@ -286,7 +286,8 @@ namespace OpenSim.Framework.Serialization.External
                     UserAccount account = userAccountService.GetUserAccount(UUID.Zero, inventoryItem.CreatorIdAsUuid);
                     if (account != null)
                     {
-                        writer.WriteElementString("CreatorData", (string)options["home"] + "/" + inventoryItem.CreatorIdAsUuid + ";" + account.FirstName + " " + account.LastName);
+                        string creatorData = ExternalRepresentationUtils.CalcCreatorData((string)options["home"], inventoryItem.CreatorIdAsUuid, account.FirstName + " " + account.LastName);
+                        writer.WriteElementString("CreatorData", creatorData);
                     }
                     writer.WriteElementString("CreatorID", inventoryItem.CreatorId);
                 }

@@ -460,9 +460,9 @@ namespace OpenSim.Region.CoreModules.Scripting.HttpRequest
                         Request.Headers.Add(HttpCustomHeaders[i],
                                             HttpCustomHeaders[i+1]);
                 }
-                if (proxyurl != null && proxyurl.Length > 0)
+                if (!string.IsNullOrEmpty(proxyurl))
                 {
-                    if (proxyexcepts != null && proxyexcepts.Length > 0)
+                    if (!string.IsNullOrEmpty(proxyexcepts))
                     {
                         string[] elist = proxyexcepts.Split(';');
                         Request.Proxy = new WebProxy(proxyurl, true, elist);
@@ -483,14 +483,13 @@ namespace OpenSim.Region.CoreModules.Scripting.HttpRequest
                 }
 
                 // Encode outbound data
-                if (OutboundBody != null && OutboundBody.Length > 0)
+                if (!string.IsNullOrEmpty(OutboundBody))
                 {
                     byte[] data = Util.UTF8.GetBytes(OutboundBody);
 
                     Request.ContentLength = data.Length;
-                    Stream bstream = Request.GetRequestStream();
-                    bstream.Write(data, 0, data.Length);
-                    bstream.Close();
+                    using (Stream bstream = Request.GetRequestStream())
+                        bstream.Write(data, 0, data.Length);
                 }
 
                 try
