@@ -33,6 +33,7 @@ using System.Collections.Generic;
 using System.IO;
 using Nini.Config;
 using OpenSim.Framework;
+using OpenSim.Framework.ServiceAuth;
 using OpenSim.Server.Base;
 using OpenSim.Services.Interfaces;
 using OpenSim.Framework.Servers.HttpServer;
@@ -71,7 +72,9 @@ namespace OpenSim.Server.Handlers.Asset
             m_InventoryService =
                     ServerUtils.LoadPlugin<IInventoryService>(inventoryService, args);
 
-            server.AddStreamHandler(new XInventoryConnectorPostHandler(m_InventoryService));
+            IServiceAuth auth = ServiceAuth.Create(config, m_ConfigName);
+
+            server.AddStreamHandler(new XInventoryConnectorPostHandler(m_InventoryService, auth));
         }
     }
 
@@ -81,8 +84,8 @@ namespace OpenSim.Server.Handlers.Asset
 
         private IInventoryService m_InventoryService;
 
-        public XInventoryConnectorPostHandler(IInventoryService service) :
-                base("POST", "/xinventory")
+        public XInventoryConnectorPostHandler(IInventoryService service, IServiceAuth auth) :
+                base("POST", "/xinventory", auth)
         {
             m_InventoryService = service;
         }
@@ -114,8 +117,6 @@ namespace OpenSim.Server.Handlers.Asset
                         return HandleCreateUserInventory(request);
                     case "GETINVENTORYSKELETON":
                         return HandleGetInventorySkeleton(request);
-                    case "GETUSERINVENTORY":
-                        return HandleGetUserInventory(request);
                     case "GETROOTFOLDER":
                         return HandleGetRootFolder(request);
                     case "GETFOLDERFORTYPE":
@@ -190,18 +191,7 @@ namespace OpenSim.Server.Handlers.Asset
 
             rootElement.AppendChild(result);
 
-            return DocToBytes(doc);
-        }
-
-        private byte[] DocToBytes(XmlDocument doc)
-        {
-            MemoryStream ms = new MemoryStream();
-            XmlTextWriter xw = new XmlTextWriter(ms, null);
-            xw.Formatting = Formatting.Indented;
-            doc.WriteTo(xw);
-            xw.Flush();
-
-            return ms.ToArray();
+            return Util.DocToBytes(doc);
         }
 
         byte[] HandleCreateUserInventory(Dictionary<string,object> request)
@@ -243,45 +233,6 @@ namespace OpenSim.Server.Handlers.Asset
                 }
             }
             result["FOLDERS"] = sfolders;
-
-            string xmlString = ServerUtils.BuildXmlResponse(result);
-
-            //m_log.DebugFormat("[XXX]: resp string: {0}", xmlString);
-            return Util.UTF8NoBomEncoding.GetBytes(xmlString);
-        }
-
-        byte[] HandleGetUserInventory(Dictionary<string, object> request)
-        {
-            Dictionary<string, object> result = new Dictionary<string, object>();
-            UUID principal = UUID.Zero;
-            UUID.TryParse(request["PRINCIPAL"].ToString(), out principal);
-
-            InventoryCollection icoll = m_InventoryService.GetUserInventory(principal);
-            if (icoll != null)
-            {
-                Dictionary<string, object> folders = new Dictionary<string, object>();
-                int i = 0;
-                if (icoll.Folders != null)
-                {
-                    foreach (InventoryFolderBase f in icoll.Folders)
-                    {
-                        folders["folder_" + i.ToString()] = EncodeFolder(f);
-                        i++;
-                    }
-                    result["FOLDERS"] = folders;
-                }
-                if (icoll.Items != null)
-                {
-                    i = 0;
-                    Dictionary<string, object> items = new Dictionary<string, object>();
-                    foreach (InventoryItemBase it in icoll.Items)
-                    {
-                        items["item_" + i.ToString()] = EncodeItem(it);
-                        i++;
-                    }
-                    result["ITEMS"] = items;
-                }
-            }
 
             string xmlString = ServerUtils.BuildXmlResponse(result);
 

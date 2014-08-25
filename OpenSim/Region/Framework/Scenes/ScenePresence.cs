@@ -208,7 +208,6 @@ namespace OpenSim.Region.Framework.Scenes
 //        private int m_lastColCount = -1;		//KF: Look for Collision chnages
 //        private int m_updateCount = 0;			//KF: Update Anims for a while
 //        private static readonly int UPDATE_COUNT = 10;		// how many frames to update for
-        private List<uint> m_lastColliders = new List<uint>();
 
         private TeleportFlags m_teleportFlags;
         public TeleportFlags TeleportFlags
@@ -271,9 +270,6 @@ namespace OpenSim.Region.Framework.Scenes
         //private int m_moveToPositionStateStatus;
         //*****************************************************
 
-        private bool m_collisionEventFlag = false;
-        private object m_collisionEventLock = new Object();
-
         private int m_movementAnimationUpdateCounter = 0;
 
         public Vector3 PrevSitOffset { get; set; }
@@ -289,6 +285,8 @@ namespace OpenSim.Region.Framework.Scenes
 //                m_log.DebugFormat("[SCENE PRESENCE]: Set appearance for {0} to {1}", Name, value);
             }
         }
+
+        public bool SentInitialDataToClient { get; private set; }
 
         /// <summary>
         /// Copy of the script states while the agent is in transit. This state may
@@ -346,6 +344,12 @@ namespace OpenSim.Region.Framework.Scenes
         /// it is a value type.
         /// </summary>
         private object m_originRegionIDAccessLock = new object();
+
+        /// <summary>
+        /// Triggered on entity transfer after to allow CompleteMovement() to proceed after we have received an
+        /// UpdateAgent from the originating region.ddkjjkj
+        /// </summary>
+        private AutoResetEvent m_updateAgentReceivedAfterTransferEvent = new AutoResetEvent(false);
 
         /// <summary>
         /// Used by the entity transfer module to signal when the presence should not be closed because a subsequent
@@ -451,7 +455,19 @@ namespace OpenSim.Region.Framework.Scenes
         public string Firstname { get; private set; }
         public string Lastname { get; private set; }
 
-        public string Grouptitle { get; set; }
+        public string Grouptitle
+        {
+            get { return UseFakeGroupTitle ? "(Loading)" : m_groupTitle; }
+            set { m_groupTitle = value; }
+        }
+        private string m_groupTitle;
+
+        /// <summary>
+        /// When this is 'true', return a dummy group title instead of the real group title. This is
+        /// used as part of a hack to force viewers to update the displayed avatar name.
+        /// </summary>
+        public bool UseFakeGroupTitle { get; set; }
+
 
         // Agent's Draw distance.
         public float DrawDistance { get; set; }
@@ -538,7 +554,7 @@ namespace OpenSim.Region.Framework.Scenes
                     SceneObjectPart sitPart = ParentPart;
 
                     if (sitPart != null)
-                        return sitPart.AbsolutePosition + (m_pos * sitPart.GetWorldRotation());
+                        return sitPart.ParentGroup.AbsolutePosition + (m_pos * sitPart.GetWorldRotation());
                 }
                 
                 return m_pos;
@@ -851,6 +867,11 @@ namespace OpenSim.Region.Framework.Scenes
             get { return Util.GetViewerName(m_scene.AuthenticateHandler.GetAgentCircuitData(ControllingClient.CircuitCode)); }
         }
 
+        /// <summary>
+        /// Count of how many terse updates we have sent out.  It doesn't matter if this overflows.
+        /// </summary>
+        private int m_terseUpdateCount;
+
         #endregion
 
         #region Constructor(s)
@@ -865,7 +886,8 @@ namespace OpenSim.Region.Framework.Scenes
             m_sendCoarseLocationsMethod = SendCoarseLocationsDefault;
             Animator = new ScenePresenceAnimator(this);
             PresenceType = type;
-            DrawDistance = world.DefaultDrawDistance;
+            // DrawDistance = world.DefaultDrawDistance;
+            DrawDistance = Constants.RegionSize;
             RegionHandle = world.RegionInfo.RegionHandle;
             ControllingClient = client;
             Firstname = ControllingClient.FirstName;
@@ -1051,6 +1073,17 @@ namespace OpenSim.Region.Framework.Scenes
             if (gm != null)
                 Grouptitle = gm.GetGroupTitle(m_uuid);
 
+            AgentCircuitData aCircuit = m_scene.AuthenticateHandler.GetAgentCircuitData(ControllingClient.CircuitCode);
+            uint teleportFlags = (aCircuit == null) ? 0 : aCircuit.teleportFlags;
+            if ((teleportFlags & (uint)TeleportFlags.ViaHGLogin) != 0)
+            {
+                // The avatar is arriving from another grid. This means that we may have changed the
+                // avatar's name to or from the special Hypergrid format ("First.Last @grid.example.com").
+                // Unfortunately, due to a viewer bug, viewers don't always show the new name.
+                // But we have a trick that can force them to update the name anyway.
+                ForceViewersUpdateName();
+            }
+
             RegionHandle = m_scene.RegionInfo.RegionHandle;
 
             m_scene.EventManager.TriggerSetRootAgentScene(m_uuid, m_scene);
@@ -1173,19 +1206,17 @@ namespace OpenSim.Region.Framework.Scenes
             // and it has already rezzed the attachments and started their scripts.
             // We do the following only for non-login agents, because their scripts
             // haven't started yet.
-            if (PresenceType == PresenceType.Npc || (TeleportFlags & TeleportFlags.ViaLogin) != 0)
+            if (PresenceType == PresenceType.Npc || IsRealLogin(m_teleportFlags))
             {
                 // Viewers which have a current outfit folder will actually rez their own attachments.  However,
                 // viewers without (e.g. v1 viewers) will not, so we still need to make this call.
                 if (Scene.AttachmentsModule != null)
-                    Util.FireAndForget(
-                        o => 
-                        { 
-//                            if (PresenceType != PresenceType.Npc && Util.FireAndForgetMethod != FireAndForgetMethod.None) 
-//                                System.Threading.Thread.Sleep(7000); 
-
-                            Scene.AttachmentsModule.RezAttachments(this); 
-                        });
+                {
+                    Util.FireAndForget(o =>
+                    {
+                        Scene.AttachmentsModule.RezAttachments(this);
+                    });
+                }
             }
             else
             {
@@ -1227,7 +1258,7 @@ namespace OpenSim.Region.Framework.Scenes
                 }
             }
 
-            SendAvatarDataToAllAgents();
+            SendAvatarDataToAllClients();
 
             // send the animations of the other presences to me
             m_scene.ForEachRootScenePresence(delegate(ScenePresence presence)
@@ -1245,6 +1276,41 @@ namespace OpenSim.Region.Framework.Scenes
             m_scene.EventManager.TriggerOnMakeRootAgent(this);
 
             return true;
+        }
+
+        private static bool IsRealLogin(TeleportFlags teleportFlags)
+        {
+            return ((teleportFlags & TeleportFlags.ViaLogin) != 0) && ((teleportFlags & TeleportFlags.ViaHGLogin) == 0);
+        }
+
+        /// <summary>
+        /// Force viewers to show the avatar's current name.
+        /// </summary>
+        /// <remarks>
+        /// The avatar name that is shown above the avatar in the viewers is sent in ObjectUpdate packets,
+        /// and they get the name from the ScenePresence. Unfortunately, viewers have a bug (as of April 2014)
+        /// where they ignore changes to the avatar name. However, tey don't ignore changes to the avatar's
+        /// Group Title. So the following trick makes viewers update the avatar's name by briefly changing
+        /// the group title (to "(Loading)"), and then restoring it.
+        /// </remarks>
+        public void ForceViewersUpdateName()
+        {
+            m_log.DebugFormat("[SCENE PRESENCE]: Forcing viewers to update the avatar name for " + Name);
+
+            UseFakeGroupTitle = true;
+            SendAvatarDataToAllClients(false);
+
+            Util.FireAndForget(o =>
+            {
+                // Viewers only update the avatar name when idle. Therefore, we must wait long
+                // enough for the viewer to show the fake name that we had set above, and only
+                // then switch back to the true name. This delay was chosen because it has a high
+                // chance of succeeding (we don't want to choose a value that's too low).
+                Thread.Sleep(5000);
+
+                UseFakeGroupTitle = false;
+                SendAvatarDataToAllClients(false);
+            });
         }
 
         public int GetStateSource()
@@ -1275,6 +1341,11 @@ namespace OpenSim.Region.Framework.Scenes
             m_scene.EventManager.OnRegionHeartbeatEnd -= RegionHeartbeatEnd;
 
             m_log.DebugFormat("[SCENE PRESENCE]: Making {0} a child agent in {1}", Name, Scene.RegionInfo.RegionName);
+
+            // Reset the m_originRegionID as it has dual use as a flag to signal that the UpdateAgent() call orignating
+            // from the source simulator has completed on a V2 teleport.
+            lock (m_originRegionIDAccessLock)
+                m_originRegionID = UUID.Zero;
 
             // Reset these so that teleporting in and walking out isn't seen
             // as teleporting back
@@ -1585,8 +1656,7 @@ namespace OpenSim.Region.Framework.Scenes
                 // For the moment, just set the size as passed.
                 PhysicsActor.Size = size;
                 //  PhysicsActor.setAvatarSize(size, feetoffset);
-            }
-            
+            }            
         }
 
         private bool WaitForUpdateAgent(IClientAPI client)
@@ -1595,20 +1665,12 @@ namespace OpenSim.Region.Framework.Scenes
             // (which triggers Scene.IncomingUpdateChildAgent(AgentData cAgentData) here in the destination, 
             // m_originRegionID is UUID.Zero; after, it's non-Zero.  The CompleteMovement sequence initiated from the
             // viewer (in turn triggered by the source region sending it a TeleportFinish event) waits until it's non-zero
-            int count = 50;
-            UUID originID;
+            m_updateAgentReceivedAfterTransferEvent.WaitOne(10000);
+
+            UUID originID = UUID.Zero;           
 
             lock (m_originRegionIDAccessLock)
-                originID = m_originRegionID;
-
-            while (originID.Equals(UUID.Zero) && count-- > 0)
-            {
-                lock (m_originRegionIDAccessLock)
-                    originID = m_originRegionID;
-
-                m_log.DebugFormat("[SCENE PRESENCE]: Agent {0} waiting for update in {1}", client.Name, Scene.Name);
-                Thread.Sleep(200);
-            }
+                originID = m_originRegionID;           
 
             if (originID.Equals(UUID.Zero))
             {
@@ -1637,109 +1699,117 @@ namespace OpenSim.Region.Framework.Scenes
                 "[SCENE PRESENCE]: Completing movement of {0} into region {1} in position {2}",
                 client.Name, Scene.Name, AbsolutePosition);
 
-            // Make sure it's not a login agent. We don't want to wait for updates during login
-            if (PresenceType != PresenceType.Npc && (m_teleportFlags & TeleportFlags.ViaLogin) == 0)
+            bool flying = ((m_AgentControlFlags & AgentManager.ControlFlags.AGENT_CONTROL_FLY) != 0);   // Get this ahead of time because IsInTransit modifies 'm_AgentControlFlags'
+
+            IsInTransit = true;
+            try
             {
-                // Let's wait until UpdateAgent (called by departing region) is done
-                if (!WaitForUpdateAgent(client))
-                    // The sending region never sent the UpdateAgent data, we have to refuse
+                // Make sure it's not a login agent. We don't want to wait for updates during login
+                if (!(PresenceType == PresenceType.Npc || IsRealLogin(m_teleportFlags)))
+                {
+                    // Let's wait until UpdateAgent (called by departing region) is done
+                    if (!WaitForUpdateAgent(client))
+                        // The sending region never sent the UpdateAgent data, we have to refuse
+                        return;
+                }
+
+                Vector3 look = Velocity;
+
+                //            if ((look.X == 0) && (look.Y == 0) && (look.Z == 0))
+                if ((Math.Abs(look.X) < 0.1) && (Math.Abs(look.Y) < 0.1) && (Math.Abs(look.Z) < 0.1))
+                {
+                    look = new Vector3(0.99f, 0.042f, 0);
+                }
+
+                // Prevent teleporting to an underground location
+                // (may crash client otherwise)
+                //
+                Vector3 pos = AbsolutePosition;
+                float ground = m_scene.GetGroundHeight(pos.X, pos.Y);
+                if (pos.Z < ground + 1.5f)
+                {
+                    pos.Z = ground + 1.5f;
+                    AbsolutePosition = pos;
+                }
+
+                if (!MakeRootAgent(AbsolutePosition, flying))
+                {
+                    m_log.DebugFormat(
+                        "[SCENE PRESENCE]: Aborting CompleteMovement call for {0} in {1} as they are already root", 
+                        Name, Scene.Name);
+
                     return;
+                }
+
+                // Tell the client that we're totally ready
+                ControllingClient.MoveAgentIntoRegion(m_scene.RegionInfo, AbsolutePosition, look);
+
+                // Child agents send initial data up in LLUDPServer.HandleUseCircuitCode()
+                if (!SentInitialDataToClient)
+                    SendInitialDataToClient();
+
+    //            m_log.DebugFormat("[SCENE PRESENCE] Completed movement");
+
+                if (!string.IsNullOrEmpty(m_callbackURI))
+                {
+                    // We cannot sleep here since this would hold up the inbound packet processing thread, as
+                    // CompleteMovement() is executed synchronously.  However, it might be better to delay the release
+                    // here until we know for sure that the agent is active in this region.  Sending AgentMovementComplete
+                    // is not enough for Imprudence clients - there appears to be a small delay (<200ms, <500ms) until they regard this
+                    // region as the current region, meaning that a close sent before then will fail the teleport.
+    //                System.Threading.Thread.Sleep(2000);
+
+                    m_log.DebugFormat(
+                        "[SCENE PRESENCE]: Releasing {0} {1} with callback to {2}",
+                        client.Name, client.AgentId, m_callbackURI);
+
+                    Scene.SimulationService.ReleaseAgent(m_originRegionID, UUID, m_callbackURI);
+                    m_callbackURI = null;
+                }
+    //            else
+    //            {
+    //                m_log.DebugFormat(
+    //                    "[SCENE PRESENCE]: No callback provided on CompleteMovement of {0} {1} to {2}",
+    //                    client.Name, client.AgentId, m_scene.RegionInfo.RegionName);
+    //            }
+
+                ValidateAndSendAppearanceAndAgentData();
+
+                // Create child agents in neighbouring regions
+                if (openChildAgents && !IsChildAgent)
+                {
+                    IEntityTransferModule m_agentTransfer = m_scene.RequestModuleInterface<IEntityTransferModule>();
+                    if (m_agentTransfer != null)
+                    {
+                        // Note: this call can take a while, because it notifies each of the simulator's neighbours.
+                        // It's important that we don't allow the avatar to cross regions meanwhile, as that will
+                        // cause serious errors. We've prevented that from happening by setting IsInTransit=true.
+                        m_agentTransfer.EnableChildAgents(this);
+                    }
+
+                    IFriendsModule friendsModule = m_scene.RequestModuleInterface<IFriendsModule>();
+                    if (friendsModule != null)
+                        friendsModule.SendFriendsOnlineIfNeeded(ControllingClient);
+
+                }
+
+                // XXX: If we force an update here, then multiple attachments do appear correctly on a destination region
+                // If we do it a little bit earlier (e.g. when converting the child to a root agent) then this does not work.
+                // This may be due to viewer code or it may be something we're not doing properly simulator side.
+                lock (m_attachments)
+                {
+                    foreach (SceneObjectGroup sog in m_attachments)
+                        sog.ScheduleGroupForFullUpdate();
+                }
+
+    //            m_log.DebugFormat(
+    //                "[SCENE PRESENCE]: Completing movement of {0} into region {1} took {2}ms", 
+    //                client.Name, Scene.RegionInfo.RegionName, (DateTime.Now - startTime).Milliseconds);
             }
-
-            Vector3 look = Velocity;
-
-            //            if ((look.X == 0) && (look.Y == 0) && (look.Z == 0))
-            if ((Math.Abs(look.X) < 0.1) && (Math.Abs(look.Y) < 0.1) && (Math.Abs(look.Z) < 0.1))
+            finally
             {
-                look = new Vector3(0.99f, 0.042f, 0);
+                IsInTransit = false;
             }
-
-            // Prevent teleporting to an underground location
-            // (may crash client otherwise)
-            //
-            Vector3 pos = AbsolutePosition;
-            float ground = m_scene.GetGroundHeight(pos.X, pos.Y);
-            if (pos.Z < ground + 1.5f)
-            {
-                pos.Z = ground + 1.5f;
-                AbsolutePosition = pos;
-            }
-
-            bool flying = ((m_AgentControlFlags & AgentManager.ControlFlags.AGENT_CONTROL_FLY) != 0);
-            if (!MakeRootAgent(AbsolutePosition, flying))
-            {
-                m_log.DebugFormat(
-                    "[SCENE PRESENCE]: Aborting CompleteMovement call for {0} in {1} as they are already root", 
-                    Name, Scene.Name);
-
-                return;
-            }
-
-            // Tell the client that we're totally ready
-            ControllingClient.MoveAgentIntoRegion(m_scene.RegionInfo, AbsolutePosition, look);
-
-            // Remember in HandleUseCircuitCode, we delayed this to here
-            if (m_teleportFlags > 0)
-                SendInitialDataToMe();
-
-//            m_log.DebugFormat("[SCENE PRESENCE] Completed movement");
-
-            if (!string.IsNullOrEmpty(m_callbackURI))
-            {
-                // We cannot sleep here since this would hold up the inbound packet processing thread, as
-                // CompleteMovement() is executed synchronously.  However, it might be better to delay the release
-                // here until we know for sure that the agent is active in this region.  Sending AgentMovementComplete
-                // is not enough for Imprudence clients - there appears to be a small delay (<200ms, <500ms) until they regard this
-                // region as the current region, meaning that a close sent before then will fail the teleport.
-//                System.Threading.Thread.Sleep(2000);
-
-                m_log.DebugFormat(
-                    "[SCENE PRESENCE]: Releasing {0} {1} with callback to {2}",
-                    client.Name, client.AgentId, m_callbackURI);
-
-                UUID originID;
-
-                lock (m_originRegionIDAccessLock)
-                    originID = m_originRegionID;
-
-                Scene.SimulationService.ReleaseAgent(originID, UUID, m_callbackURI);
-                m_callbackURI = null;
-            }
-//            else
-//            {
-//                m_log.DebugFormat(
-//                    "[SCENE PRESENCE]: No callback provided on CompleteMovement of {0} {1} to {2}",
-//                    client.Name, client.AgentId, m_scene.RegionInfo.RegionName);
-//            }
-
-            ValidateAndSendAppearanceAndAgentData();
-
-            // Create child agents in neighbouring regions
-            if (openChildAgents && !IsChildAgent)
-            {
-                IEntityTransferModule m_agentTransfer = m_scene.RequestModuleInterface<IEntityTransferModule>();
-                if (m_agentTransfer != null)
-                    m_agentTransfer.EnableChildAgents(this);
-
-                IFriendsModule friendsModule = m_scene.RequestModuleInterface<IFriendsModule>();
-                if (friendsModule != null)
-                    friendsModule.SendFriendsOnlineIfNeeded(ControllingClient);
-
-            }
-
-            // XXX: If we force an update here, then multiple attachments do appear correctly on a destination region
-            // If we do it a little bit earlier (e.g. when converting the child to a root agent) then this does not work.
-            // This may be due to viewer code or it may be something we're not doing properly simulator side.
-            lock (m_attachments)
-            {
-                foreach (SceneObjectGroup sog in m_attachments)
-                    sog.ScheduleGroupForFullUpdate();
-            }
-
-//            m_log.DebugFormat(
-//                "[SCENE PRESENCE]: Completing movement of {0} into region {1} took {2}ms", 
-//                client.Name, Scene.RegionInfo.RegionName, (DateTime.Now - startTime).Milliseconds);
-
         }
 
         /// <summary>
@@ -1864,8 +1934,8 @@ namespace OpenSim.Region.Framework.Scenes
             // When we get to the point of re-computing neighbors everytime this
             // changes, then start using the agent's drawdistance rather than the 
             // region's draw distance.
-            // DrawDistance = agentData.Far;
-            DrawDistance = Scene.DefaultDrawDistance;
+            DrawDistance = agentData.Far;
+            // DrawDistance = Scene.DefaultDrawDistance;
 
             m_mouseLook = (flags & AgentManager.ControlFlags.AGENT_CONTROL_MOUSELOOK) != 0;
             m_leftButtonDown = (flags & AgentManager.ControlFlags.AGENT_CONTROL_LBUTTON_DOWN) != 0;
@@ -2223,8 +2293,8 @@ namespace OpenSim.Region.Framework.Scenes
             // When we get to the point of re-computing neighbors everytime this
             // changes, then start using the agent's drawdistance rather than the 
             // region's draw distance.
-            // DrawDistance = agentData.Far;
-            DrawDistance = Scene.DefaultDrawDistance;
+            DrawDistance = agentData.Far;
+            // DrawDistance = Scene.DefaultDrawDistance;
 
             // Check if Client has camera in 'follow cam' or 'build' mode.
             Vector3 camdif = (Vector3.One * Rotation - Vector3.One * CameraRotation);
@@ -2408,6 +2478,8 @@ namespace OpenSim.Region.Framework.Scenes
                 || pos.Z < 0)
                 return;
 
+            Scene targetScene = m_scene;
+
 //            Vector3 heightAdjust = new Vector3(0, 0, Appearance.AvatarHeight / 2);
 //            pos += heightAdjust;
 //
@@ -2419,17 +2491,21 @@ namespace OpenSim.Region.Framework.Scenes
 //            }
 
             // Get terrain height for sub-region in a megaregion if necessary
-            int X = (int)((m_scene.RegionInfo.WorldLocX) + pos.X);
-            int Y = (int)((m_scene.RegionInfo.WorldLocY) + pos.Y);
-            GridRegion target_region = m_scene.GridService.GetRegionByPosition(m_scene.RegionInfo.ScopeID, X, Y);
-            // If X and Y is NaN, target_region will be null
-            if (target_region == null)
-                return;
-            UUID target_regionID = target_region.RegionID;
-            Scene targetScene = m_scene;
 
-            if (!SceneManager.Instance.TryGetScene(target_regionID, out targetScene))
-                targetScene = m_scene;
+				//COMMENT: If its only nessesary in a megaregion, why do it on normal region's too?
+
+        	if (regionCombinerModule != null)
+            {
+                int x = (int)((m_scene.RegionInfo.WorldLocX) + pos.X);
+                int y = (int)((m_scene.RegionInfo.WorldLocY) + pos.Y);
+                GridRegion target_region = m_scene.GridService.GetRegionByPosition(m_scene.RegionInfo.ScopeID, x, y);
+
+                // If X and Y is NaN, target_region will be null
+                if (target_region == null)
+                    return;
+               
+                SceneManager.Instance.TryGetScene(target_region.RegionID, out targetScene);
+            }
 
             float terrainHeight = (float)targetScene.Heightmap[(int)(pos.X % regionSize.X), (int)(pos.Y % regionSize.Y)];
             pos.Z = Math.Max(terrainHeight, pos.Z);
@@ -2440,14 +2516,17 @@ namespace OpenSim.Region.Framework.Scenes
             if (pos.Z - terrainHeight < 0.2)
                 pos.Z = terrainHeight;
 
-//            m_log.DebugFormat(
-//                "[SCENE PRESENCE]: Avatar {0} set move to target {1} (terrain height {2}) in {3}",
-//                Name, pos, terrainHeight, m_scene.RegionInfo.RegionName);
-
             if (noFly)
                 Flying = false;
             else if (pos.Z > terrainHeight)
                 Flying = true;
+
+//            m_log.DebugFormat(
+//                "[SCENE PRESENCE]: Avatar {0} set move to target {1} (terrain height {2}) in {3}",
+//                Name, pos, terrainHeight, m_scene.RegionInfo.RegionName);
+
+			if (noFly)
+				Flying = false;
 
             LandAtTarget = landAtTarget;
             MovingToTarget = true;
@@ -2575,7 +2654,7 @@ namespace OpenSim.Region.Framework.Scenes
 
             if (satOnObject)
             {
-                SendAvatarDataToAllAgents();
+                SendAvatarDataToAllClients();
                 m_requestedSitTargetID = 0;
 
                 part.RemoveSittingAvatar(this);
@@ -2691,7 +2770,34 @@ namespace OpenSim.Region.Framework.Scenes
                 part.AddSittingAvatar(this);
 
                 cameraAtOffset = part.GetCameraAtOffset();
+
+                if (!part.IsRoot && cameraAtOffset == Vector3.Zero)
+                    cameraAtOffset = part.ParentGroup.RootPart.GetCameraAtOffset();
+
+                bool cameraEyeOffsetFromRootForChild = false;
                 cameraEyeOffset = part.GetCameraEyeOffset();
+
+                if (!part.IsRoot && cameraEyeOffset == Vector3.Zero)
+                {                 
+                    cameraEyeOffset = part.ParentGroup.RootPart.GetCameraEyeOffset();
+                    cameraEyeOffsetFromRootForChild = true;
+                }
+
+                if ((cameraEyeOffset != Vector3.Zero && !cameraEyeOffsetFromRootForChild) || cameraAtOffset != Vector3.Zero)
+                {
+                    if (!part.IsRoot)
+                    {
+                        cameraEyeOffset = cameraEyeOffset * part.RotationOffset;
+                        cameraAtOffset += part.OffsetPosition;
+                    }
+
+                    cameraEyeOffset += part.OffsetPosition;
+                }
+
+//                m_log.DebugFormat(
+//                    "[SCENE PRESENCE]: Using cameraAtOffset {0}, cameraEyeOffset {1} for sit on {2} by {3} in {4}", 
+//                    cameraAtOffset, cameraEyeOffset, part.Name, Name, Scene.Name);
+
                 forceMouselook = part.GetForceMouselook();
 
                 // An viewer expects to specify sit positions as offsets to the root prim, even if a child prim is
@@ -2843,7 +2949,7 @@ namespace OpenSim.Region.Framework.Scenes
                 Animator.TrySetMovementAnimation("SIT_GROUND");
             else
                 Animator.TrySetMovementAnimation("SIT");
-            SendAvatarDataToAllAgents();
+            SendAvatarDataToAllClients();
 
             part.ParentGroup.TriggerScriptChangedEvent(Changed.LINK);
         }
@@ -2866,7 +2972,6 @@ namespace OpenSim.Region.Framework.Scenes
                     return;
                 }
 
-
                 if (part.SitTargetAvatar == UUID)
                 {
                     Vector3 sitTargetPos = part.SitTargetPosition;
@@ -2881,28 +2986,40 @@ namespace OpenSim.Region.Framework.Scenes
 
                     //Quaternion result = (sitTargetOrient * vq) * nq;
 
-                    double x, y, z, m;
+                    double x, y, z, m1, m2;
 
                     Quaternion r = sitTargetOrient;
-                    m = r.X * r.X + r.Y * r.Y + r.Z * r.Z + r.W * r.W;
+                    m1 = r.X * r.X + r.Y * r.Y;
+                    m2 = r.Z * r.Z + r.W * r.W;
 
-                    if (Math.Abs(1.0 - m) > 0.000001)
-                    {
-                        m = 1.0 / Math.Sqrt(m);
-                        r.X *= (float)m;
-                        r.Y *= (float)m;
-                        r.Z *= (float)m;
-                        r.W *= (float)m;
-                    }
-
+                    // Rotate the vector <0, 0, 1>
                     x = 2 * (r.X * r.Z + r.Y * r.W);
                     y = 2 * (-r.X * r.W + r.Y * r.Z);
-                    z = -r.X * r.X - r.Y * r.Y + r.Z * r.Z + r.W * r.W;
+                    z = m2 - m1;
+
+                    // Set m to be the square of the norm of r.
+                    double m = m1 + m2;
+
+                    // This constant is emperically determined to be what is used in SL.
+                    // See also http://opensimulator.org/mantis/view.php?id=7096
+                    double offset = 0.05;
+
+                    // Normally m will be ~ 1, but if someone passed a handcrafted quaternion
+                    // to llSitTarget with values so small that squaring them is rounded off
+                    // to zero, then m could be zero. The result of this floating point
+                    // round off error (causing us to skip this impossible normalization)
+                    // is only 5 cm.
+                    if (m > 0.000001)
+                    {
+                        offset /= m;
+                    }
 
                     Vector3 up = new Vector3((float)x, (float)y, (float)z);
-                    Vector3 sitOffset = up * Appearance.AvatarHeight * 0.02638f;
+                    Vector3 sitOffset = up * (float)offset;
 
-                    Vector3 newPos = sitTargetPos + sitOffset + SIT_TARGET_ADJUSTMENT;
+                    // sitOffset is in Avatar Center coordinates: from origin to 'sitTargetPos + SIT_TARGET_ADJUSTMENT'.
+                    // So, we need to _substract_ it to get to the origin of the Avatar Center.
+                    Vector3 newPos = sitTargetPos + SIT_TARGET_ADJUSTMENT - sitOffset;
                     Quaternion newRot;
 
                     if (part.IsRoot)
@@ -2935,7 +3052,7 @@ namespace OpenSim.Region.Framework.Scenes
 //                            Name, part.AbsolutePosition, m_pos, ParentPosition, part.Name, part.LocalId);
                 }
 
-                ParentPart = m_scene.GetSceneObjectPart(m_requestedSitTargetID);
+                ParentPart = part;
                 ParentID = m_requestedSitTargetID;
                 m_AngularVelocity = Vector3.Zero;
                 Velocity = Vector3.Zero;
@@ -2947,7 +3064,7 @@ namespace OpenSim.Region.Framework.Scenes
                     sitAnimation = part.SitAnimation;
                 }
                 Animator.TrySetMovementAnimation(sitAnimation);
-                SendAvatarDataToAllAgents();
+                SendAvatarDataToAllClients();
                 TriggerScenePresenceUpdated();
             }
         }
@@ -3064,29 +3181,25 @@ namespace OpenSim.Region.Framework.Scenes
 
         public override void Update()
         {
-            const float ROTATION_TOLERANCE = 0.01f;
-            const float VELOCITY_TOLERANCE = 0.001f;
-            const float POSITION_TOLERANCE = 0.05f;
-
             if (IsChildAgent == false)
             {
                 // NOTE: Velocity is not the same as m_velocity. Velocity will attempt to
                 // grab the latest PhysicsActor velocity, whereas m_velocity is often
                 // storing a requested force instead of an actual traveling velocity
                 if (Appearance.AvatarSize != m_lastSize && !IsLoggingIn)
-                    SendAvatarDataToAllAgents();
+                    SendAvatarDataToAllClients();
 
                 // Allow any updates for sitting avatars to that llSetPrimitiveLinkParams() can work for very
                 // small increments (e.g. sit position adjusters).  An alternative may be to eliminate the tolerance
                 // checks on all updates but the ramifications of this would need careful consideration.
                 bool updateClients 
                     = IsSatOnObject && (Rotation != m_lastRotation || Velocity != m_lastVelocity || m_pos != m_lastPosition);
-
+                                 
                 if (!updateClients)
                     updateClients 
-                        = !Rotation.ApproxEquals(m_lastRotation, ROTATION_TOLERANCE) 
-                            || !Velocity.ApproxEquals(m_lastVelocity, VELOCITY_TOLERANCE)
-                            || !m_pos.ApproxEquals(m_lastPosition, POSITION_TOLERANCE);
+                        = !Rotation.ApproxEquals(m_lastRotation, Scene.RootRotationUpdateTolerance) 
+                            || !Velocity.ApproxEquals(m_lastVelocity, Scene.RootVelocityUpdateTolerance)
+                            || !m_pos.ApproxEquals(m_lastPosition, Scene.RootPositionUpdateTolerance);
 
                 if (updateClients)
                 {
@@ -3108,7 +3221,6 @@ namespace OpenSim.Region.Framework.Scenes
 
         #region Update Client(s)
 
-
         /// <summary>
         /// Sends a location update to the client connected to this scenePresence
         /// </summary>
@@ -3119,6 +3231,29 @@ namespace OpenSim.Region.Framework.Scenes
             // server.
             if (remoteClient.IsActive)
             {
+                if (Scene.RootTerseUpdatePeriod > 1)
+                {
+//                    Console.WriteLine(
+//                        "{0} {1} {2} {3} {4} {5} for {6} to {7}", 
+//                        remoteClient.AgentId, UUID, remoteClient.SceneAgent.IsChildAgent, m_terseUpdateCount, Scene.RootTerseUpdatePeriod, Velocity.ApproxEquals(Vector3.Zero, 0.001f), Name, remoteClient.Name);
+                    if (remoteClient.AgentId != UUID
+                        && !remoteClient.SceneAgent.IsChildAgent
+                        && m_terseUpdateCount % Scene.RootTerseUpdatePeriod != 0 
+                        && !Velocity.ApproxEquals(Vector3.Zero, 0.001f))
+                    {
+//                        m_log.DebugFormat("[SCENE PRESENCE]: Discarded update from {0} to {1}, args {2} {3} {4} {5} {6} {7}",
+//                            Name, remoteClient.Name, remoteClient.AgentId, UUID, remoteClient.SceneAgent.IsChildAgent, m_terseUpdateCount, Scene.RootTerseUpdatePeriod, Velocity.ApproxEquals(Vector3.Zero, 0.001f));
+
+                        return;
+                    }
+                }
+
+                if (Scene.ChildTerseUpdatePeriod > 1 
+                    && remoteClient.SceneAgent.IsChildAgent
+                    && m_terseUpdateCount % Scene.ChildTerseUpdatePeriod != 0 
+                    && !Velocity.ApproxEquals(Vector3.Zero, 0.001f))
+                        return;
+
                 //m_log.DebugFormat("[SCENE PRESENCE]: " + Name + " sending TerseUpdate to " + remoteClient.Name + " : Pos={0} Rot={1} Vel={2}", m_pos, Rotation, m_velocity);
 
                 remoteClient.SendEntityUpdate(
@@ -3156,7 +3291,11 @@ namespace OpenSim.Region.Framework.Scenes
             float distanceError = Vector3.Distance(OffsetPosition, expectedPosition);
 
             float speed = Velocity.Length();
-            float velocidyDiff = Vector3.Distance(lastVelocitySentToAllClients, Velocity);
+            float velocityDiff = Vector3.Distance(lastVelocitySentToAllClients, Velocity);
+
+//            m_log.DebugFormat(
+//                "[SCENE PRESENCE]: Delta-v {0}, lastVelocity {1}, Velocity {2} for {3} in {4}",
+//                velocidyDiff, lastVelocitySentToAllClients, Velocity, Name, Scene.Name);
 
             // assuming 5 ms. worst case precision for timer, use 2x that 
             // for distance error threshold
@@ -3164,11 +3303,17 @@ namespace OpenSim.Region.Framework.Scenes
 
             if (speed < 0.01f // allow rotation updates if avatar position is unchanged
                 || Math.Abs(distanceError) > distanceErrorThreshold
-                || velocidyDiff > 0.01f) // did velocity change from last update?
+                || velocityDiff > 0.01f) // did velocity change from last update?
             {
+//                m_log.DebugFormat(
+//                    "[SCENE PRESENCE]: Update triggered with speed {0}, distanceError {1}, distanceThreshold {2}, delta-v {3} for {4} in {5}", 
+//                    speed, distanceError, distanceErrorThreshold, velocidyDiff, Name, Scene.Name);
+
                 lastVelocitySentToAllClients = Velocity;
                 lastTerseUpdateToAllClientsTick = currentTick;
                 lastPositionSentToAllClients = OffsetPosition;
+
+                m_terseUpdateCount++;
 
 //                Console.WriteLine("Scheduled update for {0} in {1}", Name, Scene.Name);
                 m_scene.ForEachClient(SendTerseUpdateToClient);
@@ -3196,16 +3341,22 @@ namespace OpenSim.Region.Framework.Scenes
             ControllingClient.SendCoarseLocationUpdate(avatarUUIDs, coarseLocations);
         }
 
-        public void SendInitialDataToMe()
+        public void SendInitialDataToClient()
         {
+            SentInitialDataToClient = true;
+
             // Send all scene object to the new client
             Util.RunThreadNoTimeout(delegate
             {
+//                m_log.DebugFormat(
+//                    "[SCENE PRESENCE]: Sending initial data to {0} agent {1} in {2}, tp flags {3}", 
+//                    IsChildAgent ? "child" : "root", Name, Scene.Name, m_teleportFlags);
+
                 // we created a new ScenePresence (a new child agent) in a fresh region.
                 // Request info about all the (root) agents in this region
                 // Note: This won't send data *to* other clients in that region (children don't send)
-                SendOtherAgentsAvatarDataToMe();
-                SendOtherAgentsAppearanceToMe();
+                SendOtherAgentsAvatarDataToClient();
+                SendOtherAgentsAppearanceToClient();
 
                 EntityBase[] entities = Scene.Entities.GetEntities();
                 foreach (EntityBase e in entities)
@@ -3214,7 +3365,7 @@ namespace OpenSim.Region.Framework.Scenes
                         ((SceneObjectGroup)e).SendFullUpdateToClient(ControllingClient);
                 }
 
-            }, "SendInitialDataToMe", null);
+            }, "SendInitialDataToClient", null);
         }
 
         /// <summary>
@@ -3247,10 +3398,10 @@ namespace OpenSim.Region.Framework.Scenes
             // getting other avatars information was initiated elsewhere immediately after the child circuit connected... don't do it
             // again here... this comes after the cached appearance check because the avatars
             // appearance goes into the avatar update packet
-            SendAvatarDataToAllAgents();
+            SendAvatarDataToAllClients();
 
             // This invocation always shows up in the viewer logs as an error.  Is it needed?
-            SendAppearanceToAgent(this);
+            SendAppearanceToClient(this);
 
             // If we are using the the cached appearance then send it out to everyone
             if (cachedappearance)
@@ -3260,15 +3411,20 @@ namespace OpenSim.Region.Framework.Scenes
                 // If the avatars baked textures are all in the cache, then we have a 
                 // complete appearance... send it out, if not, then we'll send it when
                 // the avatar finishes updating its appearance
-                SendAppearanceToAllOtherAgents();
+                SendAppearanceToAllOtherClients();
             }
+        }
+
+        public void SendAvatarDataToAllClients()
+        {
+            SendAvatarDataToAllClients(true);
         }
 
         /// <summary>
         /// Send this agent's avatar data to all other root and child agents in the scene
         /// This agent must be root. This avatar will receive its own update. 
         /// </summary>
-        public void SendAvatarDataToAllAgents()
+        public void SendAvatarDataToAllClients(bool full)
         {
             //m_log.DebugFormat("[SCENE PRESENCE] SendAvatarDataToAllAgents: {0} ({1})", Name, UUID);
             // only send update from root agents to other clients; children are only "listening posts"
@@ -3285,10 +3441,13 @@ namespace OpenSim.Region.Framework.Scenes
 
             int count = 0;
             m_scene.ForEachScenePresence(delegate(ScenePresence scenePresence)
-                                         {
-                                             SendAvatarDataToAgent(scenePresence);
-                                             count++;
-                                         });
+            {
+                if (full)
+                    SendAvatarDataToClient(scenePresence);
+                else
+                    scenePresence.ControllingClient.SendAvatarDataImmediate(this);
+                count++;
+            });
 
             m_scene.StatsReporter.AddAgentUpdates(count);
         }
@@ -3297,7 +3456,7 @@ namespace OpenSim.Region.Framework.Scenes
         /// Send avatar data for all other root agents to this agent, this agent
         /// can be either a child or root
         /// </summary>
-        public void SendOtherAgentsAvatarDataToMe()
+        public void SendOtherAgentsAvatarDataToClient()
         {
             int count = 0;
             m_scene.ForEachRootScenePresence(delegate(ScenePresence scenePresence)
@@ -3306,7 +3465,7 @@ namespace OpenSim.Region.Framework.Scenes
                             if (scenePresence.UUID == UUID)
                                 return;
                                              
-                            scenePresence.SendAvatarDataToAgent(this);
+                            scenePresence.SendAvatarDataToClient(this);
                             count++;
                         });
 
@@ -3317,9 +3476,9 @@ namespace OpenSim.Region.Framework.Scenes
         /// Send avatar data to an agent.
         /// </summary>
         /// <param name="avatar"></param>
-        public void SendAvatarDataToAgent(ScenePresence avatar)
+        public void SendAvatarDataToClient(ScenePresence avatar)
         {
-            //m_log.DebugFormat("[SCENE PRESENCE] SendAvatarDataToAgent from {0} ({1}) to {2} ({3})", Name, UUID, avatar.Name, avatar.UUID);
+            //m_log.DebugFormat("[SCENE PRESENCE] SendAvatarDataToClient from {0} ({1}) to {2} ({3})", Name, UUID, avatar.Name, avatar.UUID);
 
             avatar.ControllingClient.SendAvatarDataImmediate(this);
             Animator.SendAnimPackToClient(avatar.ControllingClient);
@@ -3329,9 +3488,9 @@ namespace OpenSim.Region.Framework.Scenes
         /// Send this agent's appearance to all other root and child agents in the scene
         /// This agent must be root.
         /// </summary>
-        public void SendAppearanceToAllOtherAgents()
+        public void SendAppearanceToAllOtherClients()
         {
-//            m_log.DebugFormat("[SCENE PRESENCE] SendAppearanceToAllOtherAgents: {0} {1}", Name, UUID);
+//            m_log.DebugFormat("[SCENE PRESENCE] SendAppearanceToAllOtherClients: {0} {1}", Name, UUID);
 
             // only send update from root agents to other clients; children are only "listening posts"
             if (IsChildAgent)
@@ -3350,7 +3509,7 @@ namespace OpenSim.Region.Framework.Scenes
                             if (scenePresence.UUID == UUID)
                                 return;
 
-                            SendAppearanceToAgent(scenePresence);
+                            SendAppearanceToClient(scenePresence);
                             count++;
                         });
 
@@ -3361,9 +3520,9 @@ namespace OpenSim.Region.Framework.Scenes
         /// Send appearance from all other root agents to this agent. this agent
         /// can be either root or child
         /// </summary>
-        public void SendOtherAgentsAppearanceToMe()
+        public void SendOtherAgentsAppearanceToClient()
         {
-//            m_log.DebugFormat("[SCENE PRESENCE] SendOtherAgentsAppearanceToMe: {0} {1}", Name, UUID);
+//            m_log.DebugFormat("[SCENE PRESENCE] SendOtherAgentsAppearanceToClient {0} {1}", Name, UUID);
 
             int count = 0;
             m_scene.ForEachRootScenePresence(delegate(ScenePresence scenePresence)
@@ -3372,7 +3531,7 @@ namespace OpenSim.Region.Framework.Scenes
                             if (scenePresence.UUID == UUID)
                                 return;
                                              
-                            scenePresence.SendAppearanceToAgent(this);
+                            scenePresence.SendAppearanceToClient(this);
                             count++;
                         });
 
@@ -3383,7 +3542,7 @@ namespace OpenSim.Region.Framework.Scenes
         /// Send appearance data to an agent.
         /// </summary>
         /// <param name="avatar"></param>
-        public void SendAppearanceToAgent(ScenePresence avatar)
+        public void SendAppearanceToClient(ScenePresence avatar)
         {
 //            m_log.DebugFormat(
 //                "[SCENE PRESENCE]: Sending appearance data from {0} {1} to {2} {3}", Name, m_uuid, avatar.Name, avatar.UUID);
@@ -3470,65 +3629,50 @@ namespace OpenSim.Region.Framework.Scenes
             if (ParentID != 0 || PhysicsActor == null || ParentUUID != UUID.Zero)
                 return;
 
-            if (!IsInTransit)
+            if (IsInTransit)
+                return;
+
+            Vector3 pos2 = AbsolutePosition;
+            Vector3 origPosition = pos2;
+            Vector3 vel = Velocity;
+
+            // Compute the avatar position in the next physics tick.
+            // If the avatar will be crossing, we force the crossing to happen now
+            //     in the hope that this will make the avatar movement smoother when crossing.
+            float timeStep = 0.1f;
+            pos2.X = pos2.X + (vel.X * timeStep);
+            pos2.Y = pos2.Y + (vel.Y * timeStep);
+            pos2.Z = pos2.Z + (vel.Z * timeStep);
+
+            if (m_scene.PositionIsInCurrentRegion(pos2))
+                return;
+
+            m_log.DebugFormat("{0} CheckForBorderCrossing: position outside region. {1} in {2} at pos {3}", 
+                                    LogHeader, Name, Scene.Name, pos2);
+
+            // Disconnect from the current region
+            bool isFlying = Flying;
+            RemoveFromPhysicalScene();
+            // pos2 is the forcasted position so make that the 'current' position so the crossing
+            //    code will move us into the newly addressed region.
+            m_pos = pos2;
+            if (CrossToNewRegion())
             {
-                Vector3 pos2 = AbsolutePosition;
-                Vector3 origPosition = pos2;
-                Vector3 vel = Velocity;
-
-                // Compute the avatar position in the next physics tick.
-                // If the avatar will be crossing, we force the crossing to happen now
-                //     in the hope that this will make the avatar movement smoother when crossing.
-                float timeStep = 0.1f;
-                pos2.X = pos2.X + (vel.X * timeStep);
-                pos2.Y = pos2.Y + (vel.Y * timeStep);
-                pos2.Z = pos2.Z + (vel.Z * timeStep);
-
-                if (!IsInTransit)
+                AddToPhysicalScene(isFlying);
+            }
+            else
+            {
+                // Tried to make crossing happen but it failed.
+                if (m_requestedSitTargetUUID == UUID.Zero)
                 {
-                    if (!m_scene.PositionIsInCurrentRegion(pos2))
-                    {
-                        m_log.DebugFormat("{0} CheckForBorderCrossing: position outside region. {1} in {2} at pos {3}", 
-                                                LogHeader, Name, Scene.Name, pos2);
+                    m_log.DebugFormat("{0} CheckForBorderCrossing: Crossing failed. Restoring old position.", LogHeader);
 
-                        // Disconnect from the current region
-                        bool isFlying = Flying;
-                        RemoveFromPhysicalScene();
-                        // pos2 is the forcasted position so make that the 'current' position so the crossing
-                        //    code will move us into the newly addressed region.
-                        m_pos = pos2;
-                        if (CrossToNewRegion())
-                        {
-                            AddToPhysicalScene(isFlying);
-                        }
-                        else
-                        {
-                            // Tried to make crossing happen but it failed.
-                            if (m_requestedSitTargetUUID == UUID.Zero)
-                            {
-                                m_log.DebugFormat("{0} CheckForBorderCrossing: Crossing failed. Restoring old position.", LogHeader);
+                    Velocity = Vector3.Zero;
+                    AbsolutePosition = EnforceSanityOnPosition(origPosition);
 
-                                Velocity = Vector3.Zero;
-                                AbsolutePosition = EnforceSanityOnPosition(origPosition);
-
-                                AddToPhysicalScene(isFlying);
-                            }
-                        }
-                    }
+                    AddToPhysicalScene(isFlying);
                 }
-                else
-                {
-                    // This constant has been inferred from experimentation
-                    // I'm not sure what this value should be, so I tried a few values.
-                    timeStep = 0.04f;
-                    pos2 = AbsolutePosition;
-                    pos2.X = pos2.X + (vel.X * timeStep);
-                    pos2.Y = pos2.Y + (vel.Y * timeStep);
-                    // Don't touch the Z
-                    m_pos = pos2;
-                    m_log.DebugFormat("[SCENE PRESENCE]: In transit m_pos={0}", m_pos);
-                }
-            }   
+            }
         }
 
         // Given a position, make sure it is within the current region.
@@ -3616,7 +3760,9 @@ namespace OpenSim.Region.Framework.Scenes
 
 //                    m_log.Debug("---> x: " + x + "; newx:" + newRegionX + "; Abs:" + (int)Math.Abs((int)(x - newRegionX)));
 //                    m_log.Debug("---> y: " + y + "; newy:" + newRegionY + "; Abs:" + (int)Math.Abs((int)(y - newRegionY)));
-                    if (Util.IsOutsideView(DrawDistance, x, newRegionX, y, newRegionY))
+                    float dist = (float)Math.Max(Scene.DefaultDrawDistance,
+                            (float)Math.Max(Scene.RegionInfo.RegionSizeX, Scene.RegionInfo.RegionSizeY));
+                    if (Util.IsOutsideView(dist, x, newRegionX, y, newRegionY))
                     {
                         byebyeRegions.Add(handle);
                     }
@@ -3679,6 +3825,8 @@ namespace OpenSim.Region.Framework.Scenes
                 return;
 
             CopyFrom(cAgentData);
+
+            m_updateAgentReceivedAfterTransferEvent.Set();
         }
 
         private static Vector3 marker = new Vector3(-1f, -1f, -1f);
@@ -3692,18 +3840,23 @@ namespace OpenSim.Region.Framework.Scenes
             if (!IsChildAgent)
                 return;
 
-            //m_log.Debug("   >>> ChildAgentPositionUpdate <<< " + rRegionX + "-" + rRegionY);
+//            m_log.DebugFormat(
+//                "[SCENE PRESENCE]: ChildAgentPositionUpdate for {0} in {1}, tRegion {2},{3}, rRegion {4},{5}, pos {6}",
+//                Name, Scene.Name, tRegionX, tRegionY, rRegionX, rRegionY, cAgentData.Position);
+
             // Find  the distance (in meters) between the two regions
-            uint shiftx = Util.RegionToWorldLoc(rRegionX - tRegionX);
-            uint shifty = Util.RegionToWorldLoc(rRegionY - tRegionY);
+            // XXX: We cannot use Util.RegionLocToHandle() here because a negative value will silently overflow the
+            // uint
+            int shiftx = (int)(((int)rRegionX - (int)tRegionX) * Constants.RegionSize);
+            int shifty = (int)(((int)rRegionY - (int)tRegionY) * Constants.RegionSize);
 
             Vector3 offset = new Vector3(shiftx, shifty, 0f);
 
             // When we get to the point of re-computing neighbors everytime this
             // changes, then start using the agent's drawdistance rather than the 
             // region's draw distance.
-            // DrawDistance = cAgentData.Far;
-            DrawDistance = Scene.DefaultDrawDistance;
+            DrawDistance = cAgentData.Far;
+            // DrawDistance = Scene.DefaultDrawDistance;
 
             if (cAgentData.Position != marker) // UGH!!
                 m_pos = cAgentData.Position + offset;
@@ -3796,9 +3949,6 @@ namespace OpenSim.Region.Framework.Scenes
 
         private void CopyFrom(AgentData cAgent)
         {
-            lock (m_originRegionIDAccessLock)
-                m_originRegionID = cAgent.RegionID;
-
             m_callbackURI = cAgent.CallbackURI;
 //            m_log.DebugFormat(
 //                "[SCENE PRESENCE]: Set callback for {0} in {1} to {2} in CopyFrom()",
@@ -3816,8 +3966,8 @@ namespace OpenSim.Region.Framework.Scenes
             // When we get to the point of re-computing neighbors everytime this
             // changes, then start using the agent's drawdistance rather than the 
             // region's draw distance.
-            // DrawDistance = cAgent.Far;
-            DrawDistance = Scene.DefaultDrawDistance;
+            DrawDistance = cAgent.Far;
+            // DrawDistance = Scene.DefaultDrawDistance;
 
             if ((cAgent.Throttles != null) && cAgent.Throttles.Length > 0)
                 ControllingClient.SetChildAgentThrottle(cAgent.Throttles);
@@ -3871,6 +4021,12 @@ namespace OpenSim.Region.Framework.Scenes
 
             if (Scene.AttachmentsModule != null)
                 Scene.AttachmentsModule.CopyAttachments(cAgent, this);
+
+            // This must occur after attachments are copied, as it releases the CompleteMovement() calling thread
+            // originating from the client completing a teleport.  Otherwise, CompleteMovement() code to restart
+            // script attachments can outrace this thread.
+            lock (m_originRegionIDAccessLock)
+                m_originRegionID = cAgent.RegionID;
         }
 
         public bool CopyAgent(out IAgentData agent)

@@ -204,12 +204,13 @@
     ; meshing = ZeroMesher
 
     ;; Choose one of the physics engines below
-    ;# {physics} {} {Select physics engine} {OpenDynamicsEngine BulletSim basicphysics POS} OpenDynamicsEngine
-    ;; OpenDynamicsEngine is by some distance the most developed physics engine
-    ;; BulletSim is experimental and in active development.
-    ;; basicphysics effectively does not model physics at all, making all
-    ;; objects phantom.   
-    ;; Default is OpenDynamicsEngine
+    ;# {physics} {} {Select physics engine} {OpenDynamicsEngine BulletSim basicphysics POS} BulletSim
+    ;; BulletSim is the default physics engine.  It provides the best performance and most functionality.
+    ;; BulletSim supports varregions.
+    ;; OpenDynamicsEngine was the previous default physics engine in OpenSimulator 0.7.6.1 and before.  
+    ;; It continues to provide a workable physics implementation.  It does not currently support varregions.
+    ;; basicphysics effectively does not model physics at all, making all objects phantom.   
+    ;; Default is BulletSim
     ; physics = OpenDynamicsEngine
     ; physics = BulletSim
     ; physics = basicphysics
@@ -469,6 +470,16 @@
     ;; web server
     ; user_agent = "OpenSim LSL (Mozilla Compatible)"
 
+	;; The follow 3 variables are for HTTP Basic Authentication for the Robust services.
+	;; Use this if your central services in port 8003 need to be accessible on the Internet
+	;; but you want to protect them from unauthorized access. The username and password
+	;; here need to match the ones in the Robust service configuration.
+    ; AuthType = "BasicHttpAuthentication"
+    ; HttpAuthUsername = "some_username"
+    ; HttpAuthPassword = "some_password"
+	;;
+	;; Any of these 3 variables above can be overriden in any of the service sections.
+
 
 [XMLRPC]
     ;# {XmlRpcRouterModule} {} {Module used to route incoming llRemoteData calls} {XmlRpcRouterModule XmlRpcGridRouterModule} XmlRpcRouterModule
@@ -527,15 +538,19 @@
 
 
 [SimulatorFeatures]
-    ;# {MapImageServerURI} {} {URL for the map server} {}
-    ; Experimental new information sent in SimulatorFeatures cap for Kokua
-    ; viewers 
-    ; meant to override the MapImage and search server url given at login, and varying 
-    ; on a sim-basis.
-    ; Viewers that don't understand it, will ignore it
-    ;MapImageServerURI = "http://127.0.0.1:9000/"
+
     ;# {SearchServerURI} {} {URL of the search server} {}
+    ;; This is identical to the Robust LoginService SearchURL setting
+    ;; and will override that value if set here. The Robust setting
+    ;; provides a working default for the grid and setting here is 
+    ;; optional.
     ;SearchServerURI = "http://127.0.0.1:9000/"
+    ;# {DestinationGuideURI} {} {URL of the destination guide} {}
+    ;;
+    ;; This serves the same purpose as the DestinationGuideURI in the
+    ;; LoginService setting in the Robust server. This will override 
+    ;; the Robust setting if desired as an option.
+    ;DestinationGuideURI = "http://127.0.0.1:9000/"
 
 
 [Chat]
@@ -996,6 +1011,10 @@
     ;; Used for V2 in HG only. If standalone, set this to local; if grided sim, set this to remote
     ; LocalService = local
 
+    ;# {SecretKey} {ServicesConnectorModule:Groups Remote Service Connector} {Secret key between sim and remote group service} {} ""
+    ;; Used for V2 in Remote only. 
+    ; SecretKey = ""
+
     ;# {GroupsServerURI} {Module:GroupsModule (ServicesConnectorModule:Groups Remote Service Connector or (ServicesConnectorModule:Groups HG Service Connector and LocalService:remote))} {Groups Server URI} {}
     ;; URI for the groups services of this grid
     ;; e.g. http://yourxmlrpcserver.com/xmlrpc.php for Flotsam XmlRpc
@@ -1028,8 +1047,11 @@
     ; Applies Flotsam Group only. V2 has this always on, no other option
     ; MessageOnlineUsersOnly = false
 
-    ;; This makes the Groups modules very chatty on the console.
+    ;; This makes the Group module very chatty on the console.
     ; DebugEnabled = false
+
+    ; This makes the Group Messaging module very chatty on the console.
+    ; DebugMessagingEnabled = false
 
     ;; XmlRpc Security settings.  These must match those set on your backend
     ;; groups service if the service is using these keys

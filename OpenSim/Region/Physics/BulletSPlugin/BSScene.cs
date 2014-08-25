@@ -88,7 +88,7 @@ public sealed class BSScene : PhysicsScene, IPhysicsParameters
     public BSConstraintCollection Constraints { get; private set; }
 
     // Simulation parameters
-    internal float m_physicsStepTime;   // if running independently, the interval simulated by default
+    //internal float m_physicsStepTime;   // if running independently, the interval simulated by default
 
     internal int m_maxSubSteps;
     internal float m_fixedTimeStep;
@@ -471,7 +471,14 @@ public sealed class BSScene : PhysicsScene, IPhysicsParameters
         // We must generate a collision for avatars whether they collide or not.
         // This is required by OpenSim to update avatar animations, etc.
         lock (m_avatars)
-            m_avatars.Add(actor);
+        {
+            // The funky copy is because this list has few and infrequent changes but is
+            //    read zillions of times. This allows the reader/iterator to use the
+            //    list and this creates a new list with any updates.
+            HashSet<BSPhysObject> avatarTemp = new HashSet<BSPhysObject>(m_avatars);
+            avatarTemp.Add(actor);
+            m_avatars = avatarTemp;
+        }
 
         return actor;
     }
@@ -491,7 +498,11 @@ public sealed class BSScene : PhysicsScene, IPhysicsParameters
                     PhysObjects.Remove(bsactor.LocalID);
                 // Remove kludge someday
                 lock (m_avatars)
-                    m_avatars.Remove(bsactor);
+                {
+                    HashSet<BSPhysObject> avatarTemp = new HashSet<BSPhysObject>(m_avatars);
+                    avatarTemp.Remove(bsactor);
+                    m_avatars = avatarTemp;
+                }
             }
             catch (Exception e)
             {
@@ -639,15 +650,18 @@ public sealed class BSScene : PhysicsScene, IPhysicsParameters
         {
             if (collidersCount > 0)
             {
-                for (int ii = 0; ii < collidersCount; ii++)
+                lock (PhysObjects)
                 {
-                    uint cA = m_collisionArray[ii].aID;
-                    uint cB = m_collisionArray[ii].bID;
-                    Vector3 point = m_collisionArray[ii].point;
-                    Vector3 normal = m_collisionArray[ii].normal;
-                    float penetration = m_collisionArray[ii].penetration;
-                    SendCollision(cA, cB, point, normal, penetration);
-                    SendCollision(cB, cA, point, -normal, penetration);
+                    for (int ii = 0; ii < collidersCount; ii++)
+                    {
+                        uint cA = m_collisionArray[ii].aID;
+                        uint cB = m_collisionArray[ii].bID;
+                        Vector3 point = m_collisionArray[ii].point;
+                        Vector3 normal = m_collisionArray[ii].normal;
+                        float penetration = m_collisionArray[ii].penetration;
+                        SendCollision(cA, cB, point, normal, penetration);
+                        SendCollision(cB, cA, point, -normal, penetration);
+                    }
                 }
             }
         }
@@ -658,14 +672,17 @@ public sealed class BSScene : PhysicsScene, IPhysicsParameters
         {
             if (updatedEntityCount > 0)
             {
-                for (int ii = 0; ii < updatedEntityCount; ii++)
+                lock (PhysObjects)
                 {
-                    EntityProperties entprop = m_updateArray[ii];
-                    BSPhysObject pobj;
-                    if (PhysObjects.TryGetValue(entprop.ID, out pobj))
+                    for (int ii = 0; ii < updatedEntityCount; ii++)
                     {
-                        if (pobj.IsInitialized)
-                            pobj.UpdateProperties(entprop);
+                        EntityProperties entprop = m_updateArray[ii];
+                        BSPhysObject pobj;
+                        if (PhysObjects.TryGetValue(entprop.ID, out pobj))
+                        {
+                            if (pobj.IsInitialized)
+                                pobj.UpdateProperties(entprop);
+                        }
                     }
                 }
             }
@@ -699,7 +716,10 @@ public sealed class BSScene : PhysicsScene, IPhysicsParameters
     //    this is is under UpdateLock.
     public void PostUpdate(BSPhysObject updatee)
     {
-        ObjectsWithUpdates.Add(updatee);
+        lock (UpdateLock)
+        {
+            ObjectsWithUpdates.Add(updatee);
+        }
     }
 
     // The simulator thinks it is physics time so return all the collisions and position
@@ -727,9 +747,13 @@ public sealed class BSScene : PhysicsScene, IPhysicsParameters
             // The simulator expects collisions for avatars even if there are have been no collisions.
             //    The event updates avatar animations and stuff.
             // If you fix avatar animation updates, remove this overhead and let normal collision processing happen.
-            foreach (BSPhysObject bsp in m_avatars)
+            // Note that we copy the root of the list to search. Any updates will create a new list
+            //    thus freeing this code from having to do an extra lock for every collision.
+            HashSet<BSPhysObject> avatarTemp = m_avatars;
+            foreach (BSPhysObject bsp in avatarTemp)
                 if (!ObjectsWithCollisions.Contains(bsp))   // don't call avatars twice
                     bsp.SendCollisions();
+            avatarTemp = null;
 
             // Objects that are done colliding are removed from the ObjectsWithCollisions list.
             // Not done above because it is inside an iteration of ObjectWithCollisions.
@@ -797,7 +821,10 @@ public sealed class BSScene : PhysicsScene, IPhysicsParameters
             if (collider.Collide(collidingWith, collidee, collidePoint, collideNormal, penetration))
             {
                 // If a collision was 'good', remember to send it to the simulator
-                ObjectsWithCollisions.Add(collider);
+                lock (CollisionLock)
+                {
+                    ObjectsWithCollisions.Add(collider);
+                }
             }
         }
 
@@ -809,7 +836,10 @@ public sealed class BSScene : PhysicsScene, IPhysicsParameters
         while (m_initialized)
         {
             int beginSimulationRealtimeMS = Util.EnvironmentTickCount();
-            DoPhysicsStep(BSParam.PhysicsTimeStep);
+
+            if (BSParam.Active)
+                DoPhysicsStep(BSParam.PhysicsTimeStep);
+
             int simulationRealtimeMS = Util.EnvironmentTickCountSubtract(beginSimulationRealtimeMS);
             int simulationTimeVsRealtimeDifferenceMS = ((int)(BSParam.PhysicsTimeStep*1000f)) - simulationRealtimeMS;
 

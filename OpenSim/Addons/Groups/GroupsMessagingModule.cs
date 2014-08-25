@@ -56,8 +56,8 @@ namespace OpenSim.Groups
         private IGroupsServicesConnector m_groupData = null;
 
         // Config Options
-        private bool m_groupMessagingEnabled = false;
-        private bool m_debugEnabled = true;
+        private bool m_groupMessagingEnabled;
+        private bool m_debugEnabled;
 
         /// <summary>
         /// If enabled, module only tries to send group IMs to online users by querying cached presence information.
@@ -120,7 +120,7 @@ namespace OpenSim.Groups
                 return;
             }
 
-            m_debugEnabled = groupsConfig.GetBoolean("DebugEnabled", true);
+            m_debugEnabled = groupsConfig.GetBoolean("MessagingDebugEnabled", m_debugEnabled);
 
             m_log.InfoFormat(
                 "[Groups.Messaging]: GroupsMessagingModule enabled with MessageOnlineOnly = {0}, DebugEnabled = {1}",
@@ -140,6 +140,14 @@ namespace OpenSim.Groups
             scene.EventManager.OnMakeChildAgent += OnMakeChildAgent;
             scene.EventManager.OnIncomingInstantMessage += OnGridInstantMessage;
             scene.EventManager.OnClientLogin += OnClientLogin;
+
+            scene.AddCommand(
+                "Debug",
+                this,
+                "debug groups messaging verbose",
+                "debug groups messaging verbose <true|false>",
+                "This setting turns on very verbose groups messaging debugging",
+                HandleDebugGroupsMessagingVerbose);
         }
 
         public void RegionLoaded(Scene scene)
@@ -227,6 +235,26 @@ namespace OpenSim.Groups
 
         #endregion
 
+        private void HandleDebugGroupsMessagingVerbose(object modules, string[] args)
+        {
+            if (args.Length < 5)
+            {
+                MainConsole.Instance.Output("Usage: debug groups messaging verbose <true|false>");
+                return;
+            }
+
+            bool verbose = false;
+            if (!bool.TryParse(args[4], out verbose))
+            {
+                MainConsole.Instance.Output("Usage: debug groups messaging verbose <true|false>");
+                return;
+            }
+
+            m_debugEnabled = verbose;
+
+            MainConsole.Instance.OutputFormat("{0} verbose logging set to {1}", Name, m_debugEnabled);
+        }
+
         /// <summary>
         /// Not really needed, but does confirm that the group exists.
         /// </summary>
@@ -255,6 +283,8 @@ namespace OpenSim.Groups
         public void SendMessageToGroup(
             GridInstantMessage im, UUID groupID, UUID sendingAgentForGroupCalls, Func<GroupMembersData, bool> sendCondition)
         {
+            int requestStartTick = Environment.TickCount;
+
             UUID fromAgentID = new UUID(im.fromAgentID);
 
             // Unlike current XmlRpcGroups, Groups V2 can accept UUID.Zero when a perms check for the requesting agent
@@ -287,14 +317,19 @@ namespace OpenSim.Groups
 //                        "[Groups.Messaging]: SendMessageToGroup called for group {0} with {1} visible members, {2} online",
 //                        groupID, groupMembersCount, groupMembers.Count());
 
-            int requestStartTick = Environment.TickCount;
-
             im.imSessionID = groupID.Guid;
             im.fromGroup = true;
             IClientAPI thisClient = GetActiveClient(fromAgentID);
             if (thisClient != null)
             {
                 im.RegionID = thisClient.Scene.RegionInfo.RegionID.Guid;
+            }
+
+            if ((im.binaryBucket == null) || (im.binaryBucket.Length == 0) || ((im.binaryBucket.Length == 1 && im.binaryBucket[0] == 0)))
+            {
+                ExtendedGroupRecord groupInfo = m_groupData.GetGroupRecord(UUID.Zero.ToString(), groupID, null);
+                if (groupInfo != null)
+                    im.binaryBucket = Util.StringToBytes256(groupInfo.GroupName);
             }
 
             // Send to self first of all

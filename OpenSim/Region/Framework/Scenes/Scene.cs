@@ -103,7 +103,29 @@ namespace OpenSim.Region.Framework.Scenes
         /// <summary>
         /// If false then physical objects are disabled, though collisions will continue as normal.
         /// </summary>
-        public bool PhysicsEnabled { get; set; }
+        public bool PhysicsEnabled 
+        { 
+            get 
+            {
+                return m_physicsEnabled;
+            }
+
+            set
+            {
+                m_physicsEnabled = value;
+
+                if (PhysicsScene != null)
+                {
+                    IPhysicsParameters physScene = PhysicsScene as IPhysicsParameters;
+
+                    if (physScene != null)
+                        physScene.SetPhysicsParameter(
+                            "Active", m_physicsEnabled.ToString(), PhysParameterEntry.APPLY_TO_NONE);
+                }
+            }
+        }
+
+        private bool m_physicsEnabled;
 
         /// <summary>
         /// If false then scripts are not enabled on the smiulator
@@ -192,7 +214,7 @@ namespace OpenSim.Region.Framework.Scenes
         /// <summary>
         /// Maximum value of the size of a physical prim in each axis
         /// </summary>
-        public float m_maxPhys = 10;
+        public float m_maxPhys = 64;
 
         /// <summary>
         /// Max prims an object will hold
@@ -201,14 +223,39 @@ namespace OpenSim.Region.Framework.Scenes
 
         public bool m_clampPrimSize;
         public bool m_trustBinaries;
-        public bool m_allowScriptCrossings;
+        public bool m_allowScriptCrossings = true;
         public bool m_useFlySlow;
         public bool m_useTrashOnDelete = true;
 
         /// <summary>
         /// Temporarily setting to trigger appearance resends at 60 second intervals.
         /// </summary>
-        public bool SendPeriodicAppearanceUpdates { get; set; }
+        public bool SendPeriodicAppearanceUpdates { get; set; }               
+                
+        /// <summary>
+        /// How much a root agent has to change position before updates are sent to viewers.
+        /// </summary>
+        public float RootPositionUpdateTolerance { get; set; }
+
+        /// <summary>
+        /// How much a root agent has to rotate before updates are sent to viewers.
+        /// </summary>
+        public float RootRotationUpdateTolerance { get; set; }
+
+        /// <summary>
+        /// How much a root agent has to change velocity before updates are sent to viewers.
+        /// </summary>
+        public float RootVelocityUpdateTolerance { get; set; }
+
+        /// <summary>
+        /// If greater than 1, we only send terse updates to other root agents on every n updates.
+        /// </summary>
+        public int RootTerseUpdatePeriod { get; set; }
+
+        /// <summary>
+        /// If greater than 1, we only send terse updates to child agents on every n updates.
+        /// </summary>
+        public int ChildTerseUpdatePeriod { get; set; }
 
         protected float m_defaultDrawDistance = 255.0f;
         public float DefaultDrawDistance 
@@ -408,12 +455,6 @@ namespace OpenSim.Region.Framework.Scenes
 
 //        private int m_lastUpdate;
 //        private bool m_firstHeartbeat = true;
-        
-        private UpdatePrioritizationSchemes m_priorityScheme = UpdatePrioritizationSchemes.Time;
-        private bool m_reprioritizationEnabled = true;
-        private double m_reprioritizationInterval = 5000.0;
-        private double m_rootReprioritizationDistance = 10.0;
-        private double m_childReprioritizationDistance = 20.0;
 
         private Timer m_mapGenerationTimer = new Timer();
         private bool m_generateMaptiles;
@@ -646,11 +687,11 @@ namespace OpenSim.Region.Framework.Scenes
         public int MonitorLandTime { get { return landMS; } }
         public int MonitorLastFrameTick { get { return m_lastFrameTick; } }
 
-        public UpdatePrioritizationSchemes UpdatePrioritizationScheme { get { return m_priorityScheme; } }
-        public bool IsReprioritizationEnabled { get { return m_reprioritizationEnabled; } }
-        public double ReprioritizationInterval { get { return m_reprioritizationInterval; } }
-        public double RootReprioritizationDistance { get { return m_rootReprioritizationDistance; } }
-        public double ChildReprioritizationDistance { get { return m_childReprioritizationDistance; } }
+        public UpdatePrioritizationSchemes UpdatePrioritizationScheme { get; set; }
+        public bool IsReprioritizationEnabled { get; set; }
+        public double ReprioritizationInterval { get; set; }
+        public double RootReprioritizationDistance { get; set; }
+        public double ChildReprioritizationDistance { get; set; }
 
         public AgentCircuitManager AuthenticateHandler
         {
@@ -713,11 +754,11 @@ namespace OpenSim.Region.Framework.Scenes
 
         #region Constructors
 
-        public Scene(RegionInfo regInfo, AgentCircuitManager authen,
+        public Scene(RegionInfo regInfo, AgentCircuitManager authen, PhysicsScene physicsScene,
                      SceneCommunicationService sceneGridService,
                      ISimulationDataService simDataService, IEstateDataService estateDataService,
                      IConfigSource config, string simulatorVersion)
-            : this(regInfo)
+            : this(regInfo, physicsScene)
         {
             m_config = config;
             MinFrameTime = 0.089f;
@@ -789,21 +830,6 @@ namespace OpenSim.Region.Framework.Scenes
                 new EventManager.LandObjectAdded(simDataService.StoreLandObject);
             EventManager.OnLandObjectRemoved +=
                 new EventManager.LandObjectRemoved(simDataService.RemoveLandObject);
-
-            m_sceneGraph = new SceneGraph(this);
-
-            // If the scene graph has an Unrecoverable error, restart this sim.
-            // Currently the only thing that causes it to happen is two kinds of specific
-            // Physics based crashes.
-            //
-            // Out of memory
-            // Operating system has killed the plugin
-            m_sceneGraph.UnRecoverableError 
-                += () => 
-                    { 
-                        m_log.ErrorFormat("[SCENE]: Restarting region {0} due to unrecoverable physics crash", Name); 
-                        RestartNow(); 
-                    };
 
             RegisterDefaultSceneEvents();
 
@@ -991,21 +1017,35 @@ namespace OpenSim.Region.Framework.Scenes
 
                 try
                 {
-                    m_priorityScheme = (UpdatePrioritizationSchemes)Enum.Parse(typeof(UpdatePrioritizationSchemes), update_prioritization_scheme, true);
+                    UpdatePrioritizationScheme = (UpdatePrioritizationSchemes)Enum.Parse(typeof(UpdatePrioritizationSchemes), update_prioritization_scheme, true);
                 }
                 catch (Exception)
                 {
                     m_log.Warn("[PRIORITIZER]: UpdatePrioritizationScheme was not recognized, setting to default prioritizer Time");
-                    m_priorityScheme = UpdatePrioritizationSchemes.Time;
+                    UpdatePrioritizationScheme = UpdatePrioritizationSchemes.Time;
                 }
 
-                m_reprioritizationEnabled = interestConfig.GetBoolean("ReprioritizationEnabled", true);
-                m_reprioritizationInterval = interestConfig.GetDouble("ReprioritizationInterval", 5000.0);
-                m_rootReprioritizationDistance = interestConfig.GetDouble("RootReprioritizationDistance", 10.0);
-                m_childReprioritizationDistance = interestConfig.GetDouble("ChildReprioritizationDistance", 20.0);
+                IsReprioritizationEnabled 
+                    = interestConfig.GetBoolean("ReprioritizationEnabled", IsReprioritizationEnabled);
+                ReprioritizationInterval 
+                    = interestConfig.GetDouble("ReprioritizationInterval", ReprioritizationInterval);
+                RootReprioritizationDistance 
+                    = interestConfig.GetDouble("RootReprioritizationDistance", RootReprioritizationDistance);
+                ChildReprioritizationDistance 
+                    = interestConfig.GetDouble("ChildReprioritizationDistance", ChildReprioritizationDistance);
+
+                RootTerseUpdatePeriod = interestConfig.GetInt("RootTerseUpdatePeriod", RootTerseUpdatePeriod);
+                ChildTerseUpdatePeriod = interestConfig.GetInt("ChildTerseUpdatePeriod", ChildTerseUpdatePeriod);
+
+                RootPositionUpdateTolerance 
+                    = interestConfig.GetFloat("RootPositionUpdateTolerance", RootPositionUpdateTolerance);
+                RootRotationUpdateTolerance
+                    = interestConfig.GetFloat("RootRotationUpdateTolerance", RootRotationUpdateTolerance);
+                RootVelocityUpdateTolerance
+                    = interestConfig.GetFloat("RootVelocityUpdateTolerance", RootVelocityUpdateTolerance);
             }
 
-            m_log.DebugFormat("[SCENE]: Using the {0} prioritization scheme", m_priorityScheme);
+            m_log.DebugFormat("[SCENE]: Using the {0} prioritization scheme", UpdatePrioritizationScheme);
 
             #endregion Interest Management
 
@@ -1014,14 +1054,40 @@ namespace OpenSim.Region.Framework.Scenes
             StatsReporter.OnStatsIncorrect += m_sceneGraph.RecalculateStats;
         }
 
-        public Scene(RegionInfo regInfo) : base(regInfo)
-        {
+        public Scene(RegionInfo regInfo, PhysicsScene physicsScene) : base(regInfo)
+        {            
+            m_sceneGraph = new SceneGraph(this);
+            m_sceneGraph.PhysicsScene = physicsScene;
+
+            // If the scene graph has an Unrecoverable error, restart this sim.
+            // Currently the only thing that causes it to happen is two kinds of specific
+            // Physics based crashes.
+            //
+            // Out of memory
+            // Operating system has killed the plugin
+            m_sceneGraph.UnRecoverableError 
+                += () => 
+            { 
+                m_log.ErrorFormat("[SCENE]: Restarting region {0} due to unrecoverable physics crash", Name); 
+                RestartNow(); 
+            };
+
             PhysicalPrims = true;
             CollidablePrims = true;
             PhysicsEnabled = true;
 
             PeriodicBackup = true;
             UseBackup = true;
+
+            IsReprioritizationEnabled = true;
+            UpdatePrioritizationScheme = UpdatePrioritizationSchemes.Time;
+            ReprioritizationInterval = 5000;
+
+            RootRotationUpdateTolerance = 0.1f;
+            RootVelocityUpdateTolerance = 0.001f;
+            RootPositionUpdateTolerance = 0.05f;
+            RootReprioritizationDistance = 10.0;
+            ChildReprioritizationDistance = 20.0;
 
             m_eventManager = new EventManager();
 
@@ -1069,18 +1135,22 @@ namespace OpenSim.Region.Framework.Scenes
         /// <returns>True after all operations complete, throws exceptions otherwise.</returns>
         public override void OtherRegionUp(GridRegion otherRegion)
         {
-            uint xcell = Util.WorldToRegionLoc((uint)otherRegion.RegionLocX);
-            uint ycell = Util.WorldToRegionLoc((uint)otherRegion.RegionLocY);
-
-            //m_log.InfoFormat("[SCENE]: (on region {0}): Region {1} up in coords {2}-{3}", 
-            //    RegionInfo.RegionName, otherRegion.RegionName, xcell, ycell);
-
             if (RegionInfo.RegionHandle != otherRegion.RegionHandle)
             {
-                // If these are cast to INT because long + negative values + abs returns invalid data
-                int resultX = Math.Abs((int)xcell - (int)RegionInfo.RegionLocX);
-                int resultY = Math.Abs((int)ycell - (int)RegionInfo.RegionLocY);
-                if (resultX <= 1 && resultY <= 1)
+                //// If these are cast to INT because long + negative values + abs returns invalid data
+                //int resultX = Math.Abs((int)xcell - (int)RegionInfo.RegionLocX);
+                //int resultY = Math.Abs((int)ycell - (int)RegionInfo.RegionLocY);
+                //if (resultX <= 1 && resultY <= 1)
+                float dist = (float)Math.Max(DefaultDrawDistance,
+                             (float)Math.Max(RegionInfo.RegionSizeX, RegionInfo.RegionSizeY));
+                uint newRegionX, newRegionY, thisRegionX, thisRegionY;
+                Util.RegionHandleToRegionLoc(otherRegion.RegionHandle, out newRegionX, out newRegionY);
+                Util.RegionHandleToRegionLoc(RegionInfo.RegionHandle, out thisRegionX, out thisRegionY);
+
+                //m_log.InfoFormat("[SCENE]: (on region {0}): Region {1} up in coords {2}-{3}",
+                //    RegionInfo.RegionName, otherRegion.RegionName, newRegionX, newRegionY);
+
+                if (!Util.IsOutsideView(dist, thisRegionX, newRegionX, thisRegionY, newRegionY))
                 {
                     // Let the grid service module know, so this can be cached
                     m_eventManager.TriggerOnRegionUp(otherRegion);
@@ -1894,6 +1964,7 @@ namespace OpenSim.Region.Framework.Scenes
                                 RegionInfo.RegionID,
                                 RegionInfo.RegionLocX, RegionInfo.RegionLocY,
                                 RegionInfo.RegionSizeX, RegionInfo.RegionSizeY);
+
             if (error != String.Empty)
                 throw new Exception(error);
         }
@@ -2676,6 +2747,18 @@ namespace OpenSim.Region.Framework.Scenes
         }
 
         /// <summary>
+        /// Returns the Home URI of the agent, or null if unknown.
+        /// </summary>
+        public string GetAgentHomeURI(UUID agentID)
+        {
+            AgentCircuitData circuit = AuthenticateHandler.GetAgentCircuitData(agentID);
+            if (circuit != null && circuit.ServiceURLs != null && circuit.ServiceURLs.ContainsKey("HomeURI"))
+                return circuit.ServiceURLs["HomeURI"].ToString();
+            else
+                return null;
+        }
+
+        /// <summary>
         /// Cache the user name for later use.
         /// </summary>
         /// <param name="sp"></param>
@@ -3202,10 +3285,6 @@ namespace OpenSim.Region.Framework.Scenes
 
                 return;
             }
-            else
-            {
-                m_authenticateHandler.RemoveCircuit(agentID);
-            }
 
             // TODO: Can we now remove this lock?
             lock (acd)
@@ -3221,7 +3300,8 @@ namespace OpenSim.Region.Framework.Scenes
                 {
                     m_log.ErrorFormat(
                         "[SCENE]: Called RemoveClient() with agent ID {0} but no such presence is in the scene.", agentID);
-    
+                    m_authenticateHandler.RemoveCircuit(agentID);
+
                     return;
                 }
 
@@ -3298,6 +3378,7 @@ namespace OpenSim.Region.Framework.Scenes
                         // Always clean these structures up so that any failure above doesn't cause them to remain in the
                         // scene with possibly bad effects (e.g. continually timing out on unacked packets and triggering
                         // the same cleanup exception continually.
+                        m_authenticateHandler.RemoveCircuit(agentID);
                         m_sceneGraph.RemoveScenePresence(agentID);
                         m_clientManager.Remove(agentID);
         
@@ -3370,12 +3451,13 @@ namespace OpenSim.Region.Framework.Scenes
         /// </summary>
         /// <param name="agent">CircuitData of the agent who is connecting</param>
         /// <param name="teleportFlags"></param>
+        /// <param name="source">Source region (may be null)</param>
         /// <param name="reason">Outputs the reason for the false response on this string</param>
         /// <returns>True if the region accepts this agent.  False if it does not.  False will 
         /// also return a reason.</returns>
-        public bool NewUserConnection(AgentCircuitData agent, uint teleportFlags, out string reason)
+        public bool NewUserConnection(AgentCircuitData agent, uint teleportFlags, GridRegion source, out string reason)
         {
-            return NewUserConnection(agent, teleportFlags, out reason, true);
+            return NewUserConnection(agent, teleportFlags, source, out reason, true);
         }
 
         /// <summary>
@@ -3395,12 +3477,13 @@ namespace OpenSim.Region.Framework.Scenes
         /// the LLUDP stack).
         /// </remarks>
         /// <param name="acd">CircuitData of the agent who is connecting</param>
+        /// <param name="source">Source region (may be null)</param>
         /// <param name="reason">Outputs the reason for the false response on this string</param>
         /// <param name="requirePresenceLookup">True for normal presence. False for NPC
         /// or other applications where a full grid/Hypergrid presence may not be required.</param>
         /// <returns>True if the region accepts this agent.  False if it does not.  False will 
         /// also return a reason.</returns>
-        public bool NewUserConnection(AgentCircuitData acd, uint teleportFlags, out string reason, bool requirePresenceLookup)
+        public bool NewUserConnection(AgentCircuitData acd, uint teleportFlags, GridRegion source, out string reason, bool requirePresenceLookup)
         {
             bool vialogin = ((teleportFlags & (uint)TPFlags.ViaLogin) != 0 ||
                 (teleportFlags & (uint)TPFlags.ViaHGLogin) != 0);
@@ -3419,7 +3502,7 @@ namespace OpenSim.Region.Framework.Scenes
             // Don't disable this log message - it's too helpful
             string curViewer = Util.GetViewerName(acd);
             m_log.DebugFormat(
-                "[SCENE]: Region {0} told of incoming {1} agent {2} {3} {4} (circuit code {5}, IP {6}, viewer {7}, teleportflags ({8}), position {9})",
+                "[SCENE]: Region {0} told of incoming {1} agent {2} {3} {4} (circuit code {5}, IP {6}, viewer {7}, teleportflags ({8}), position {9}. {10}",
                 RegionInfo.RegionName,
                 (acd.child ? "child" : "root"),
                 acd.firstname,
@@ -3429,7 +3512,8 @@ namespace OpenSim.Region.Framework.Scenes
                 acd.IPAddress,
                 curViewer,
                 ((TPFlags)teleportFlags).ToString(),
-                acd.startpos
+                acd.startpos,
+                (source == null) ? "" : string.Format("From region {0} ({1}){2}", source.RegionName, source.RegionID, (source.RawServerURI == null) ? "" : " @ " + source.ServerURI)
             );
 
             if (!LoginsEnabled)
@@ -3447,7 +3531,7 @@ namespace OpenSim.Region.Framework.Scenes
             {
                 foreach (string viewer in m_AllowedViewers)
                 {
-                    if (viewer == curViewer.Substring(0, viewer.Length).Trim().ToLower())
+                    if (viewer == curViewer.Substring(0, Math.Min(viewer.Length, curViewer.Length)).Trim().ToLower())
                     {
                         ViewerDenied = false;
                         break;
@@ -3464,7 +3548,7 @@ namespace OpenSim.Region.Framework.Scenes
             {
                 foreach (string viewer in m_BannedViewers)
                 {
-                    if (viewer == curViewer.Substring(0, viewer.Length).Trim().ToLower())
+                    if (viewer == curViewer.Substring(0, Math.Min(viewer.Length, curViewer.Length)).Trim().ToLower())
                     {
                         ViewerDenied = true;
                         break;
@@ -3736,6 +3820,13 @@ namespace OpenSim.Region.Framework.Scenes
                             RegionInfo.RegionSettings.TelehubObject, acd.Name, Name);
                     }
 
+                    // Final permissions check; this time we don't allow changing the position
+                    if (!IsPositionAllowed(acd.AgentID, acd.startpos, ref reason))
+                    {
+                        m_authenticateHandler.RemoveCircuit(acd.circuitcode);
+                        return false;
+                    }
+
                     return true;
                 }
 
@@ -3745,8 +3836,30 @@ namespace OpenSim.Region.Framework.Scenes
                     if (land.LandData.LandingType == (byte)1 && land.LandData.UserLocation != Vector3.Zero)
                     {
                         acd.startpos = land.LandData.UserLocation;
+
+                        // Final permissions check; this time we don't allow changing the position
+                        if (!IsPositionAllowed(acd.AgentID, acd.startpos, ref reason))
+                        {
+                            m_authenticateHandler.RemoveCircuit(acd.circuitcode);
+                            return false;
+                        }
                     }
                 }
+            }
+
+            return true;
+        }
+
+        private bool IsPositionAllowed(UUID agentID, Vector3 pos, ref string reason)
+        {
+            ILandObject land = LandChannel.GetLandObject(pos);
+            if (land == null)
+                return true;
+
+            if (land.IsBannedFromLand(agentID) || land.IsRestrictedFromLand(agentID))
+            {
+                reason = "You are banned from the region.";
+                return false;
             }
 
             return true;
@@ -3850,7 +3963,7 @@ namespace OpenSim.Region.Framework.Scenes
                 if (!AuthorizationService.IsAuthorizedForRegion(
                     agent.AgentID.ToString(), agent.firstname, agent.lastname, RegionInfo.RegionID.ToString(), out reason))
                 {
-                    m_log.WarnFormat("[CONNECTION BEGIN]: Denied access to: {0} ({1} {2}) at {3} because {4}",
+                    m_log.WarnFormat("[CONNECTION BEGIN]: Denied access to: {0} ({1} {2}) at {3} because: {4}",
                                      agent.AgentID, agent.firstname, agent.lastname, RegionInfo.RegionName, reason);
                     
                     return false;
@@ -4118,7 +4231,10 @@ namespace OpenSim.Region.Framework.Scenes
         /// <returns>true if we handled it.</returns>
         public virtual bool IncomingUpdateChildAgent(AgentPosition cAgentData)
         {
-            //m_log.Debug(" XXX Scene IncomingChildAgentDataUpdate POSITION in " + RegionInfo.RegionName);
+//            m_log.DebugFormat(
+//                "[SCENE PRESENCE]: IncomingChildAgentDataUpdate POSITION for {0} in {1}, position {2}", 
+//                cAgentData.AgentID, Name, cAgentData.Position);
+
             ScenePresence childAgentUpdate = GetScenePresence(cAgentData.AgentID);
             if (childAgentUpdate != null)
             {
@@ -4501,29 +4617,18 @@ namespace OpenSim.Region.Framework.Scenes
                     {
                         return true;
                     }
-                    else if ((parcel.LandData.Flags & (uint)ParcelFlags.AllowGroupScripts) != 0)
+                    else if ((part.OwnerID == parcel.LandData.OwnerID) || Permissions.IsGod(part.OwnerID))
                     {
-                        if (part.OwnerID == parcel.LandData.OwnerID
-                            || (parcel.LandData.IsGroupOwned && part.GroupID == parcel.LandData.GroupID)
-                            || Permissions.IsGod(part.OwnerID))
-                        {
-                            return true;
-                        }
-                        else
-                        {
-                            return false;
-                        }
+                        return true;
+                    }
+                    else if (((parcel.LandData.Flags & (uint)ParcelFlags.AllowGroupScripts) != 0)
+                        && (parcel.LandData.GroupID != UUID.Zero) && (parcel.LandData.GroupID == part.GroupID))
+                    {
+                        return true;
                     }
                     else
                     {
-                        if (part.OwnerID == parcel.LandData.OwnerID)
-                        {
-                            return true;
-                        }
-                        else
-                        {
-                            return false;
-                        }
+                        return false;
                     }
                 }
                 else
@@ -5146,7 +5251,7 @@ namespace OpenSim.Region.Framework.Scenes
                 Vector3? nearestPoint = GetNearestPointInParcelAlongDirectionFromPoint(avatar.AbsolutePosition, dir, nearestParcel);
                 if (nearestPoint != null)
                 {
-                    Debug.WriteLine("Found a sane previous position based on velocity, sending them to: " + nearestPoint.ToString());
+                    m_log.Debug("Found a sane previous position based on velocity, sending them to: " + nearestPoint.ToString());
                     return nearestPoint.Value;
                 }
 
@@ -5156,7 +5261,7 @@ namespace OpenSim.Region.Framework.Scenes
                 nearestPoint = GetNearestPointInParcelAlongDirectionFromPoint(avatar.AbsolutePosition, dir, nearestParcel);
                 if (nearestPoint != null)
                 {
-                    Debug.WriteLine("They had a zero velocity, sending them to: " + nearestPoint.ToString());
+                    m_log.Debug("They had a zero velocity, sending them to: " + nearestPoint.ToString());
                     return nearestPoint.Value;
                 }
 
@@ -5165,7 +5270,7 @@ namespace OpenSim.Region.Framework.Scenes
                 {
                     // Ultimate backup if we have no idea where they are and
                     // the last allowed position was in another parcel
-                    Debug.WriteLine("Have no idea where they are, sending them to: " + avatar.lastKnownAllowedPosition.ToString());
+                    m_log.Debug("Have no idea where they are, sending them to: " + avatar.lastKnownAllowedPosition.ToString());
                     return avatar.lastKnownAllowedPosition;
                 }
 
@@ -5175,7 +5280,7 @@ namespace OpenSim.Region.Framework.Scenes
             //Go to the edge, this happens in teleporting to a region with no available parcels
             Vector3 nearestRegionEdgePoint = GetNearestRegionEdgePosition(avatar);
 
-            //Debug.WriteLine("They are really in a place they don't belong, sending them to: " + nearestRegionEdgePoint.ToString());
+            //m_log.Debug("They are really in a place they don't belong, sending them to: " + nearestRegionEdgePoint.ToString());
 
             return nearestRegionEdgePoint;
         }
@@ -5454,13 +5559,14 @@ namespace OpenSim.Region.Framework.Scenes
         /// or corssing the broder walking, but will NOT prevent
         /// child agent creation, thereby emulating the SL behavior.
         /// </remarks>
-        /// <param name='agentID'></param>
+        /// <param name='agentID'>The visitor's User ID</param>
+        /// <param name="agentHomeURI">The visitor's Home URI (may be null)</param>
         /// <param name='position'></param>
         /// <param name='reason'></param>
         /// <returns></returns>
-        public bool QueryAccess(UUID agentID, Vector3 position, out string reason)
+        public bool QueryAccess(UUID agentID, string agentHomeURI, bool viaTeleport, Vector3 position, out string reason)
         {
-            reason = "You are banned from the region";
+            reason = string.Empty;
 
             if (Permissions.IsGod(agentID))
             {
@@ -5520,10 +5626,11 @@ namespace OpenSim.Region.Framework.Scenes
             catch (Exception e)
             {
                 m_log.DebugFormat("[SCENE]: Exception authorizing agent: {0} "+ e.StackTrace, e.Message);
+                reason = "Error authorizing agent: " + e.Message;
                 return false;
             }
 
-            if (position == Vector3.Zero) // Teleport
+            if (viaTeleport)
             {
                 if (!RegionInfo.EstateSettings.AllowDirectTeleport)
                 {
@@ -5563,6 +5670,7 @@ namespace OpenSim.Region.Framework.Scenes
                 if (!TestLandRestrictions(agentID, out reason, ref posX, ref posY))
                 {
                     // m_log.DebugFormat("[SCENE]: Denying {0} because they are banned on all parcels", agentID);
+                    reason = "You are banned from the region on all parcels";
                     return false;
                 }
             }
@@ -5570,13 +5678,22 @@ namespace OpenSim.Region.Framework.Scenes
             {
                 ILandObject land = LandChannel.GetLandObject(position.X, position.Y);
                 if (land == null)
+                {
+                    reason = "No parcel found";
                     return false;
+                }
 
                 bool banned = land.IsBannedFromLand(agentID);
                 bool restricted = land.IsRestrictedFromLand(agentID);
 
                 if (banned || restricted)
+                {
+                    if (banned)
+                        reason = "You are banned from the parcel";
+                    else
+                        reason = "The parcel is restricted";
                     return false;
+                }
             }
 
             reason = String.Empty;

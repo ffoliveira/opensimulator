@@ -45,8 +45,11 @@ namespace OpenSim.Region.ClientStack.LindenUDP
 {
     public static class OpenSimTerrainCompressor
     {
-        private static readonly ILog m_log = LogManager.GetLogger(MethodBase.GetCurrentMethod().DeclaringType);
+//        private static readonly ILog m_log = LogManager.GetLogger(MethodBase.GetCurrentMethod().DeclaringType);
+
+#pragma warning disable 414
         private static string LogHeader = "[TERRAIN COMPRESSOR]";
+#pragma warning restore 414
 
         public const int END_OF_PATCHES = 97;
 
@@ -81,7 +84,7 @@ namespace OpenSim.Region.ClientStack.LindenUDP
             BuildQuantizeTable16();
         }
 
-        // Unused: left for historical reference.
+        // Used to send cloud and wind patches
         public static LayerDataPacket CreateLayerDataPacket(TerrainPatch[] patches, byte type, int pRegionSizeX,
                                                             int pRegionSizeY)
         {
@@ -116,6 +119,11 @@ namespace OpenSim.Region.ClientStack.LindenUDP
             xPieces[0] = patchX;  // patch X dimension
             yPieces[0] = patchY;
 
+            return CreateLandPacket(terrData, xPieces, yPieces);
+        }
+
+        public static LayerDataPacket CreateLandPacket(TerrainData terrData, int[] xPieces, int[] yPieces)
+        {
             byte landPacketType = (byte)TerrainPatch.LayerType.Land;
             if (terrData.SizeX > Constants.RegionSize || terrData.SizeY > Constants.RegionSize)
             {
@@ -145,8 +153,6 @@ namespace OpenSim.Region.ClientStack.LindenUDP
         ///     Array of indexes in the grid of patches.
         /// </param>
         /// <param name="type"></param>
-        /// <param name="pRegionSizeX"></param>
-        /// <param name="pRegionSizeY"></param>
         /// <returns></returns>
         public static LayerDataPacket CreateLandPacket(TerrainData terrData, int[] x, int[] y, byte type)
         {
@@ -275,7 +281,7 @@ namespace OpenSim.Region.ClientStack.LindenUDP
             }
 
             header.DCOffset = zmin;
-            header.Range = (int)(zmax - zmin + 1.0f);
+            header.Range = (int)((zmax - zmin) + 1.0f);
 
             return header;
         }
@@ -491,7 +497,6 @@ namespace OpenSim.Region.ClientStack.LindenUDP
                         lineout[CopyMatrix16[uptr + column]] = (int)(total * QuantizeTable16[uptr + column]);
                         }
                 }
-        */
 
         private static void DCTColumn16(float[] linein, int[] lineout, int column)
         {
@@ -524,6 +529,7 @@ namespace OpenSim.Region.ClientStack.LindenUDP
                 lineout[CopyMatrix16[uptr + column]] = (int) (total*QuantizeTable16[uptr + column]);
             }
         }
+        */
 
         private static int DCTColumn16Wbits(float[] linein, int[] lineout, int column, int wbits, int maxwbits)
         {

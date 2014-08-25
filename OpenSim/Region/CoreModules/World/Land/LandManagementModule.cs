@@ -75,7 +75,8 @@ namespace OpenSim.Region.CoreModules.World.Land
 
         private LandChannel landChannel;
         private Scene m_scene;
-        
+
+        protected IGroupsModule m_groupManager;
         protected IUserManagement m_userManager;
         protected IPrimCountModule m_primCountModule;
         protected IDialogModule m_Dialog;
@@ -150,9 +151,10 @@ namespace OpenSim.Region.CoreModules.World.Land
 
         public void RegionLoaded(Scene scene)
         {
-             m_userManager = m_scene.RequestModuleInterface<IUserManagement>();         
-             m_primCountModule = m_scene.RequestModuleInterface<IPrimCountModule>();
-             m_Dialog = m_scene.RequestModuleInterface<IDialogModule>();
+            m_userManager = m_scene.RequestModuleInterface<IUserManagement>();
+            m_groupManager = m_scene.RequestModuleInterface<IGroupsModule>();
+            m_primCountModule = m_scene.RequestModuleInterface<IPrimCountModule>();
+            m_Dialog = m_scene.RequestModuleInterface<IDialogModule>();
         }
 
         public void RemoveRegion(Scene scene)
@@ -848,8 +850,6 @@ namespace OpenSim.Region.CoreModules.World.Land
         /// </param>
         private ILandObject GetLandObject(int x, int y, bool returnNullIfLandObjectOutsideBounds)
         {
-            ILandObject ret = null;
-
             if (x >= m_scene.RegionInfo.RegionSizeX || y >=  m_scene.RegionInfo.RegionSizeY || x < 0 || y < 0)
             {
                 // These exceptions here will cause a lot of complaints from the users specifically because
@@ -858,7 +858,7 @@ namespace OpenSim.Region.CoreModules.World.Land
                     return null;
                 else
                     throw new Exception(
-                        String.Format("{0} GetLandObject for non-existant position. Region={1}, pos=<{2},{3}",
+                        String.Format("{0} GetLandObject for non-existent position. Region={1}, pos=<{2},{3}",
                                                 LogHeader, m_scene.RegionInfo.RegionName, x, y)
                 );
             }
@@ -1543,8 +1543,7 @@ namespace OpenSim.Region.CoreModules.World.Land
 
         private void IncomingLandObjectFromStorage(LandData data)
         {
-            ILandObject new_land = new LandObject(data.OwnerID, data.IsGroupOwned, m_scene);
-            new_land.LandData = data.Copy();
+            ILandObject new_land = new LandObject(data, m_scene);
             new_land.SetLandBitmapFromByteArray();            
             AddLandObject(new_land);
         }
@@ -1986,15 +1985,17 @@ namespace OpenSim.Region.CoreModules.World.Land
                 telehub = m_scene.GetSceneObjectGroup(m_scene.RegionInfo.RegionSettings.TelehubObject);
 
             // Can the user set home here?
-            if (// (a) gods and land managers can set home
-                m_scene.Permissions.IsAdministrator(remoteClient.AgentId) || 
-                m_scene.Permissions.IsGod(remoteClient.AgentId) ||
-                // (b) land owners can set home
-                remoteClient.AgentId == land.LandData.OwnerID ||
-                // (c) members of the land-associated group in roles that can set home
-                ((gpowers & (ulong)GroupPowers.AllowSetHome) == (ulong)GroupPowers.AllowSetHome) ||
-                // (d) parcels with telehubs can be the home of anyone
-                (telehub != null && land.ContainsPoint((int)telehub.AbsolutePosition.X, (int)telehub.AbsolutePosition.Y)))
+            if (// Required: local user; foreign users cannot set home
+                m_scene.UserManagementModule.IsLocalGridUser(remoteClient.AgentId) &&
+                (// (a) gods and land managers can set home
+                 m_scene.Permissions.IsAdministrator(remoteClient.AgentId) || 
+                 m_scene.Permissions.IsGod(remoteClient.AgentId) ||
+                 // (b) land owners can set home
+                 remoteClient.AgentId == land.LandData.OwnerID ||
+                 // (c) members of the land-associated group in roles that can set home
+                 ((gpowers & (ulong)GroupPowers.AllowSetHome) == (ulong)GroupPowers.AllowSetHome) ||
+                 // (d) parcels with telehubs can be the home of anyone
+                 (telehub != null && land.ContainsPoint((int)telehub.AbsolutePosition.X, (int)telehub.AbsolutePosition.Y))))
             {
                 if (m_scene.GridUserService.SetHome(remoteClient.AgentId.ToString(), land.RegionUUID, position, lookAt))
                     // FUBAR ALERT: this needs to be "Home position set." so the viewer saves a home-screenshot.
@@ -2099,8 +2100,18 @@ namespace OpenSim.Region.CoreModules.World.Land
                 foreach (ILandObject lo in m_landList.Values)
                 {
                     LandData ld = lo.LandData;
+                    string ownerName;
+                    if (ld.IsGroupOwned)
+                    {
+                        GroupRecord rec = m_groupManager.GetGroupRecord(ld.GroupID);
+                        ownerName = (rec != null) ? rec.GroupName : "Unknown Group";
+                    }
+                    else
+                    {
+                        ownerName = m_userManager.GetUserName(ld.OwnerID);
+                    }
                     cdt.AddRow(
-                        ld.Name, ld.LocalID, ld.Area, lo.StartPoint, lo.EndPoint, m_userManager.GetUserName(ld.OwnerID));
+                        ld.Name, ld.LocalID, ld.Area, lo.StartPoint, lo.EndPoint, ownerName);
                 }
             }
 
@@ -2121,8 +2132,17 @@ namespace OpenSim.Region.CoreModules.World.Land
             cdl.AddRow("Ends", lo.EndPoint);
             cdl.AddRow("AABB Min", ld.AABBMin);
             cdl.AddRow("AABB Max", ld.AABBMax);
-
-            cdl.AddRow("Owner", m_userManager.GetUserName(ld.OwnerID));
+            string ownerName;
+            if (ld.IsGroupOwned)
+            {
+                GroupRecord rec = m_groupManager.GetGroupRecord(ld.GroupID);
+                ownerName = (rec != null) ? rec.GroupName : "Unknown Group";
+            }
+            else
+            {
+                ownerName = m_userManager.GetUserName(ld.OwnerID);
+            }
+            cdl.AddRow("Owner", ownerName);
             cdl.AddRow("Is group owned?", ld.IsGroupOwned);
             cdl.AddRow("GroupID", ld.GroupID);
 

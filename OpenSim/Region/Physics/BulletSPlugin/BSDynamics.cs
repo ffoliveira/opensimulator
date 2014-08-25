@@ -42,7 +42,9 @@ namespace OpenSim.Region.Physics.BulletSPlugin
 {
     public sealed class BSDynamics : BSActor
     {
+#pragma warning disable 414
         private static string LogHeader = "[BULLETSIM VEHICLE]";
+#pragma warning restore 414
 
         // the prim this dynamic controller belongs to
         private BSPrimLinkable ControllingPrim { get; set; }
@@ -123,7 +125,9 @@ namespace OpenSim.Region.Physics.BulletSPlugin
 
         // Just some recomputed constants:
         static readonly float PIOverFour = ((float)Math.PI) / 4f;
+#pragma warning disable 414
         static readonly float PIOverTwo = ((float)Math.PI) / 2f;
+#pragma warning restore 414
 
         public BSDynamics(BSScene myScene, BSPrim myPrim, string actorName)
             : base(myScene, myPrim, actorName)
@@ -1111,7 +1115,7 @@ namespace OpenSim.Region.Physics.BulletSPlugin
         {
             // m_VhoverEfficiency: 0=bouncy, 1=totally damped
             // m_VhoverTimescale: time to achieve height
-            if ((m_flags & (VehicleFlag.HOVER_WATER_ONLY | VehicleFlag.HOVER_TERRAIN_ONLY | VehicleFlag.HOVER_GLOBAL_HEIGHT)) != 0)
+            if ((m_flags & (VehicleFlag.HOVER_WATER_ONLY | VehicleFlag.HOVER_TERRAIN_ONLY | VehicleFlag.HOVER_GLOBAL_HEIGHT)) != 0 && (m_VhoverHeight > 0) && (m_VhoverTimescale < 300))
             {
                 // We should hover, get the target height
                 if ((m_flags & VehicleFlag.HOVER_WATER_ONLY) != 0)
@@ -1434,6 +1438,12 @@ namespace OpenSim.Region.Physics.BulletSPlugin
                             // This is only half the distance to the target so it will take 2 seconds to complete the turn.
                             Vector3 torqueVector = Vector3.Cross(predictedUp, Vector3.UnitZ);
 
+                            if ((m_flags & VehicleFlag.LIMIT_ROLL_ONLY) != 0)
+                            {
+                                Vector3 vehicleForwardAxis = Vector3.UnitX * VehicleOrientation;
+                                torqueVector = ProjectVector(torqueVector, vehicleForwardAxis);
+                            }
+
                             // Scale vector by our timescale since it is an acceleration it is r/s^2 or radians a timescale squared
                             Vector3 vertContributionV = torqueVector * verticalAttractionSpeed * verticalAttractionSpeed;
 
@@ -1732,6 +1742,14 @@ namespace OpenSim.Region.Physics.BulletSPlugin
                 clampb = temp;
             }
            return ClampInRange(clampa, val, clampb);
+
+        }
+
+        //Given a Vector and a unit vector will return the amount of the vector is on the same axis as the unit.
+        private Vector3 ProjectVector(Vector3 vector, Vector3 onNormal)
+        {
+            float vectorDot = Vector3.Dot(vector, onNormal);
+            return onNormal * vectorDot;
 
         }
 
