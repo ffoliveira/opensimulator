@@ -33,17 +33,22 @@ using log4net;
 using OpenMetaverse;
 using OpenSim.Framework;
 using OpenSim.Data;
+using MongoDB;
+using MongoDB.Driver;
+using MongoDB.Driver.Builders;
 
-namespace OpenSim.Data.MySQL
+namespace OpenSim.Data.MongoDB
 {
     /// <summary>
-    /// A MySQL Interface for the Asset Server
+    /// A MongoDB Interface for the Asset Server
     /// </summary>
     public class MongoDBAssetData : AssetDataBase
     {
         private static readonly ILog m_log = LogManager.GetLogger(MethodBase.GetCurrentMethod().DeclaringType);
 
         private string m_connectionString;
+        private string m_mongodbname;
+        private long m_ticksToEpoch;
 
         protected virtual Assembly Assembly
         {
@@ -58,8 +63,8 @@ namespace OpenSim.Data.MySQL
         /// <para>Initialises Asset interface</para>
         /// <para>
         /// <list type="bullet">
-        /// <item>Loads and initialises the MySQL storage plugin.</item>
-        /// <item>Warns and uses the obsolete mysql_connection.ini if connect string is empty.</item>
+        /// <item>Loads and initialises the MongoDB storage plugin.</item>
+        /// <item>Warns and uses the obsolete MongoDB_connection.ini if connect string is empty.</item>
         /// <item>Check for migration</item>
         /// </list>
         /// </para>
@@ -67,14 +72,20 @@ namespace OpenSim.Data.MySQL
         /// <param name="connect">connect string</param>
         public override void Initialise(string connect)
         {
+            m_ticksToEpoch = new System.DateTime(1970, 1, 1).Ticks;
+
             m_connectionString = connect;
 
-            using (MySqlConnection dbcon = new MySqlConnection(m_connectionString))
+            m_mongodbname = MongoUrl.Create(m_connectionString).DatabaseName;
+
+            /*
+             * TODO: IMPLEMENT MONGODB MIGRATION
+            using (MongoDBConnection dbcon = new MongoDBConnection(m_connectionString))
             {
                 dbcon.Open();
                 Migration m = new Migration(dbcon, Assembly, "AssetStore");
                 m.Update();
-            }
+            }*/
         }
 
         public override void Initialise()
@@ -104,48 +115,30 @@ namespace OpenSim.Data.MySQL
         /// <remarks>On failure : throw an exception and attempt to reconnect to database</remarks>
         override public AssetBase GetAsset(UUID assetID)
         {
-            AssetBase asset = null;
+            AssetBaseM asset = null;
 
-            using (MySqlConnection dbcon = new MySqlConnection(m_connectionString))
+            try
             {
-                dbcon.Open();
+                MongoDatabase dbdata = getMongoDatabase();
 
-                using (MySqlCommand cmd = new MySqlCommand(
-                    "SELECT name, description, assetType, local, temporary, asset_flags, CreatorID, data FROM assets WHERE id=?id",
-                    dbcon))
-                {
-                    cmd.Parameters.AddWithValue("?id", assetID.ToString());
+                MongoCollection<AssetBaseM> dbcolecao = dbdata.GetCollection<AssetBaseM>("assets");
 
-                    try
-                    {
-                        using (MySqlDataReader dbReader = cmd.ExecuteReader(CommandBehavior.SingleRow))
-                        {
-                            if (dbReader.Read())
-                            {
-                                asset = new AssetBase(assetID, (string)dbReader["name"], (sbyte)dbReader["assetType"], dbReader["CreatorID"].ToString());
-                                asset.Data = (byte[])dbReader["data"];
-                                asset.Description = (string)dbReader["description"];
+                IMongoQuery query = Query<AssetBaseM>.EQ(e => e.ID, assetID.ToString());
 
-                                string local = dbReader["local"].ToString();
-                                if (local.Equals("1") || local.Equals("true", StringComparison.InvariantCultureIgnoreCase))
-                                    asset.Local = true;
-                                else
-                                    asset.Local = false;
+                asset = dbcolecao.FindOne(query);
 
-                                asset.Temporary = Convert.ToBoolean(dbReader["temporary"]);
-                                asset.Flags = (AssetFlags)Convert.ToInt32(dbReader["asset_flags"]);
-                            }
-                        }
-                    }
-                    catch (Exception e)
-                    {
-                        m_log.Error(
-                            string.Format("[ASSETS DB]: MySql failure fetching asset {0}.  Exception  ", assetID), e);
-                    }
-                }
+            }
+            catch (Exception e)
+            {
+                m_log.Error( string.Format("[ASSETS DB]: MongoDB failure fetching asset {0}.  Exception  ", assetID), e);
             }
 
-            return asset;
+            return (AssetBase)asset;
+        }
+
+        public MongoDatabase getMongoDatabase()
+        {
+            return new MongoClient(m_connectionString).GetServer().GetDatabase(m_mongodbname);
         }
 
         /// <summary>
@@ -155,74 +148,72 @@ namespace OpenSim.Data.MySQL
         /// <remarks>On failure : Throw an exception and attempt to reconnect to database</remarks>
         override public void StoreAsset(AssetBase asset)
         {
-            using (MySqlConnection dbcon = new MySqlConnection(m_connectionString))
+            try
             {
-                dbcon.Open();
-
-                using (MySqlCommand cmd =
-                    new MySqlCommand(
-                        "replace INTO assets(id, name, description, assetType, local, temporary, create_time, access_time, asset_flags, CreatorID, data)" +
-                        "VALUES(?id, ?name, ?description, ?assetType, ?local, ?temporary, ?create_time, ?access_time, ?asset_flags, ?CreatorID, ?data)",
-                        dbcon))
+                string assetName = asset.Name;
+                if (asset.Name.Length > AssetBase.MAX_ASSET_NAME)
                 {
-                    string assetName = asset.Name;
-                    if (asset.Name.Length > AssetBase.MAX_ASSET_NAME)
-                    {
-                        assetName = asset.Name.Substring(0, AssetBase.MAX_ASSET_NAME);
-                        m_log.WarnFormat(
-                            "[ASSET DB]: Name '{0}' for asset {1} truncated from {2} to {3} characters on add", 
-                            asset.Name, asset.ID, asset.Name.Length, assetName.Length);
-                    }
-
-                    string assetDescription = asset.Description;
-                    if (asset.Description.Length > AssetBase.MAX_ASSET_DESC)
-                    {
-                        assetDescription = asset.Description.Substring(0, AssetBase.MAX_ASSET_DESC);
-                        m_log.WarnFormat(
-                            "[ASSET DB]: Description '{0}' for asset {1} truncated from {2} to {3} characters on add", 
-                            asset.Description, asset.ID, asset.Description.Length, assetDescription.Length);
-                    }
-
-                    try
-                    {
-                        using (cmd)
-                        {
-                            // create unix epoch time
-                            int now = (int)Utils.DateTimeToUnixTime(DateTime.UtcNow);
-                            cmd.Parameters.AddWithValue("?id", asset.ID);
-                            cmd.Parameters.AddWithValue("?name", assetName);
-                            cmd.Parameters.AddWithValue("?description", assetDescription);
-                            cmd.Parameters.AddWithValue("?assetType", asset.Type);
-                            cmd.Parameters.AddWithValue("?local", asset.Local);
-                            cmd.Parameters.AddWithValue("?temporary", asset.Temporary);
-                            cmd.Parameters.AddWithValue("?create_time", now);
-                            cmd.Parameters.AddWithValue("?access_time", now);
-                            cmd.Parameters.AddWithValue("?CreatorID", asset.Metadata.CreatorID);
-                            cmd.Parameters.AddWithValue("?asset_flags", (int)asset.Flags);
-                            cmd.Parameters.AddWithValue("?data", asset.Data);
-                            cmd.ExecuteNonQuery();
-                        }
-                    }
-                    catch (Exception e)
-                    {
-                        m_log.Error(
-                            string.Format(
-                                "[ASSET DB]: MySQL failure creating asset {0} with name {1}.  Exception  ",
-                                asset.FullID, asset.Name)
-                            , e);
-                    }
+                    assetName = asset.Name.Substring(0, AssetBase.MAX_ASSET_NAME);
+                    m_log.WarnFormat(
+                        "[ASSET DB]: Name '{0}' for asset {1} truncated from {2} to {3} characters on add",
+                        asset.Name, asset.ID, asset.Name.Length, assetName.Length);
                 }
+
+                string assetDescription = asset.Description;
+                if (asset.Description.Length > AssetBase.MAX_ASSET_DESC)
+                {
+                    assetDescription = asset.Description.Substring(0, AssetBase.MAX_ASSET_DESC);
+                    m_log.WarnFormat(
+                        "[ASSET DB]: Description '{0}' for asset {1} truncated from {2} to {3} characters on add",
+                        asset.Description, asset.ID, asset.Description.Length, assetDescription.Length);
+                }
+
+                MongoDatabase dbdata = getMongoDatabase();
+
+                MongoCollection<AssetBaseM> dbcolecao = dbdata.GetCollection<AssetBaseM>("assets");
+
+                IMongoQuery query = Query<AssetBaseM>.EQ(e => e.ID, asset.ID);
+                AssetBaseM assetRet = dbcolecao.FindOne(query);
+
+                int now = (int)((System.DateTime.Now.Ticks - m_ticksToEpoch) / 10000000);
+
+                if (assetRet == null)
+                {
+                    assetRet = (AssetBaseM)asset;
+
+                    assetRet.create_time = now;
+                    assetRet.access_time = now;
+                    dbcolecao.Insert(assetRet);
+                }
+                else
+                {
+                    assetRet = (AssetBaseM)asset;
+                    assetRet.access_time = now;
+
+                    dbcolecao.Save(assetRet);
+                }
+
             }
+            catch (Exception e)
+            {
+                m_log.Error(
+                    string.Format(
+                        "[ASSET DB]: MongoDB failure creating asset {0} with name {1}.  Exception  ",
+                        asset.FullID, asset.Name)
+                    , e);
+            }
+
         }
 
         private void UpdateAccessTime(AssetBase asset)
         {
-            using (MySqlConnection dbcon = new MySqlConnection(m_connectionString))
+
+            using (MongoDBConnection dbcon = new MongoDBConnection(m_connectionString))
             {
                 dbcon.Open();
 
-                using (MySqlCommand cmd
-                    = new MySqlCommand("update assets set access_time=?access_time where id=?id", dbcon))
+                using (MongoDBCommand cmd
+                    = new MongoDBCommand("update assets set access_time=?access_time where id=?id", dbcon))
                 {
                     try
                     {
@@ -262,12 +253,12 @@ namespace OpenSim.Data.MySQL
             string ids = "'" + string.Join("','", uuids) + "'";
             string sql = string.Format("SELECT id FROM assets WHERE id IN ({0})", ids);
 
-            using (MySqlConnection dbcon = new MySqlConnection(m_connectionString))
+            using (MongoDBConnection dbcon = new MongoDBConnection(m_connectionString))
             {
                 dbcon.Open();
-                using (MySqlCommand cmd = new MySqlCommand(sql, dbcon))
+                using (MongoDBCommand cmd = new MongoDBCommand(sql, dbcon))
                 {
-                    using (MySqlDataReader dbReader = cmd.ExecuteReader())
+                    using (MongoDBDataReader dbReader = cmd.ExecuteReader())
                     {
                         while (dbReader.Read())
                         {
@@ -297,12 +288,12 @@ namespace OpenSim.Data.MySQL
         {
             List<AssetMetadata> retList = new List<AssetMetadata>(count);
 
-            using (MySqlConnection dbcon = new MySqlConnection(m_connectionString))
+            using (MongoDBConnection dbcon = new MongoDBConnection(m_connectionString))
             {
                 dbcon.Open();
 
-                using (MySqlCommand cmd
-                    = new MySqlCommand(
+                using (MongoDBCommand cmd
+                    = new MongoDBCommand(
                         "SELECT name,description,assetType,temporary,id,asset_flags,CreatorID FROM assets LIMIT ?start, ?count",
                         dbcon))
                 {
@@ -311,7 +302,7 @@ namespace OpenSim.Data.MySQL
 
                     try
                     {
-                        using (MySqlDataReader dbReader = cmd.ExecuteReader())
+                        using (MongoDBDataReader dbReader = cmd.ExecuteReader())
                         {
                             while (dbReader.Read())
                             {
@@ -335,7 +326,7 @@ namespace OpenSim.Data.MySQL
                     {
                         m_log.Error(
                             string.Format(
-                                "[ASSETS DB]: MySql failure fetching asset set from {0}, count {1}.  Exception  ", 
+                                "[ASSETS DB]: MongoDB failure fetching asset set from {0}, count {1}.  Exception  ", 
                                 start, count), 
                             e);
                     }
@@ -347,11 +338,11 @@ namespace OpenSim.Data.MySQL
 
         public override bool Delete(string id)
         {
-            using (MySqlConnection dbcon = new MySqlConnection(m_connectionString))
+            using (MongoDBConnection dbcon = new MongoDBConnection(m_connectionString))
             {
                 dbcon.Open();
 
-                using (MySqlCommand cmd = new MySqlCommand("delete from assets where id=?id", dbcon))
+                using (MongoDBCommand cmd = new MongoDBCommand("delete from assets where id=?id", dbcon))
                 {
                     cmd.Parameters.AddWithValue("?id", id);
                     cmd.ExecuteNonQuery();
@@ -363,4 +354,5 @@ namespace OpenSim.Data.MySQL
 
         #endregion
     }
+
 }
